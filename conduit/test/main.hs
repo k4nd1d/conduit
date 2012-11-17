@@ -5,7 +5,6 @@ import Test.Hspec
 import Test.Hspec.QuickCheck (prop)
 
 import qualified Data.Conduit as C
-import qualified Data.Conduit.Util as C
 import qualified Data.Conduit.Internal as CI
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Lazy as CLazy
@@ -149,22 +148,6 @@ main = hspec $ do
             bs1 @=? bs2
             bs1 @=? bs3
 
-    describe "zipping" $ do
-        it "zipping two small lists" $ do
-            res <- runResourceT $ C.zip (CL.sourceList [1..10]) (CL.sourceList [11..12]) C.$$ CL.consume
-            res @=? zip [1..10 :: Int] [11..12 :: Int]
-
-    describe "zipping sinks" $ do
-        it "take all" $ do
-            res <- runResourceT $ CL.sourceList [1..10] C.$$ C.zipSinks CL.consume CL.consume
-            res @=? ([1..10 :: Int], [1..10 :: Int])
-        it "take fewer on left" $ do
-            res <- runResourceT $ CL.sourceList [1..10] C.$$ C.zipSinks (CL.take 4) CL.consume
-            res @=? ([1..4 :: Int], [1..10 :: Int])
-        it "take fewer on right" $ do
-            res <- runResourceT $ CL.sourceList [1..10] C.$$ C.zipSinks CL.consume (CL.take 4)
-            res @=? ([1..10 :: Int], [1..4 :: Int])
-
     describe "Monad instance for Sink" $ do
         it "binding" $ do
             x <- runResourceT $ CL.sourceList [1..10] C.$$ do
@@ -200,8 +183,9 @@ main = hspec $ do
 
         it "map, left >+>" $ do
             x <- runResourceT $
-                CL.sourceList [1..10]
-                    C.>+> CL.map (* 2)
+                CI.SourceM
+                  (CL.sourceList [1..10]
+                    C.>+> CL.map (* 2))
                     C.$$ CL.fold (+) 0
             x `shouldBe` 2 * sum [1..10 :: Int]
 
@@ -295,6 +279,7 @@ main = hspec $ do
             x `shouldBe` [6..10]
 
     describe "lazy" $ do
+    {- FIXME write a new test
         it' "works inside a ResourceT" $ runResourceT $ do
             counter <- liftIO $ I.newIORef 0
             let incr i = C.sourceIO
@@ -313,9 +298,10 @@ main = hspec $ do
                             )
             nums <- CLazy.lazyConsume $ mconcat $ map incr [1..10]
             liftIO $ nums `shouldBe` [1..10]
+            -}
 
         it' "returns nothing outside ResourceT" $ do
-            bss <- runResourceT $ CLazy.lazyConsume $ CB.sourceFile "test/main.hs"
+            bss <- runResourceT $ CLazy.lazyConsume (CB.sourceFile "test/main.hs" :: C.Source (C.ResourceT IO) S8.ByteString)
             bss `shouldBe` []
 
     describe "sequence" $ do
@@ -344,34 +330,6 @@ main = hspec $ do
             res `shouldBe` [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 11]
 
 
-    describe "sequenceSink" $ do
-        it "simple sink" $ do
-            let sink () = do
-                    _ <- CL.drop 2
-                    x <- CL.head
-                    return $ C.Emit () $ maybe [] return x
-            let conduit = C.sequenceSink () sink
-            res <- runResourceT $ CL.sourceList [1..10 :: Int]
-                           C.$= conduit
-                           C.$$ CL.consume
-            res `shouldBe` [3, 6, 9]
-        it "finishes on new state" $ do
-            let sink () = do
-                x <- CL.head
-                return $ C.Emit () $ maybe [] return x
-            let conduit = C.sequenceSink () sink
-            res <- runResourceT $ CL.sourceList [1..10 :: Int]
-                        C.$= conduit C.$$ CL.consume
-            res `shouldBe` [1..10]
-        it "switch to a conduit" $ do
-            let sink () = do
-                _ <- CL.drop 4
-                return $ C.StartConduit $ CL.filter even
-            let conduit = C.sequenceSink () sink
-            res <- runResourceT $ CL.sourceList [1..10 :: Int]
-                            C.$= conduit
-                            C.$$ CL.consume
-            res `shouldBe` [6, 8, 10]
 #endif
 
     describe "peek" $ do
@@ -617,8 +575,9 @@ main = hspec $ do
         it "leftovers without input" $ do
             ref <- I.newIORef []
             let add x = I.modifyIORef ref (x:)
-                adder = CI.NeedInput (\a -> liftIO (add a) >> adder) return
-                residue x = CI.Leftover (CI.Done ()) x
+                adder' = CI.NeedInput (\a -> liftIO (add a) >> adder') return
+                adder = CI.Sink adder'
+                residue x = CI.Sink $ CI.Leftover (CI.Done ()) x
 
             _ <- CI.yield 1 C.$$ adder
             x <- I.readIORef ref
@@ -670,7 +629,7 @@ main = hspec $ do
             x <- CI.mapOutputMaybe (\i -> if even i then Just i else Nothing) (CL.sourceList [1..10 :: Int]) C.$$ CL.fold (+) 0
             x `shouldBe` sum [2, 4..10]
         it' "mapInput" $ do
-            xyz <- (CL.sourceList $ map show [1..10 :: Int]) C.$$ do
+            xyz <- (mapM_ C.yield $ map show [1..10 :: Int]) C.$$ do
                 (x, y) <- CI.mapInput read (Just . show) $ ((do
                     x <- CL.isolate 5 C.=$ CL.fold (+) 0
                     y <- CL.peek
@@ -682,7 +641,7 @@ main = hspec $ do
 
     describe "left/right identity" $ do
         it' "left identity" $ do
-            x <- CL.sourceList [1..10 :: Int] C.$$ CI.idP C.=$ CL.fold (+) 0
+            x <- CL.sourceList [1..10 :: Int] C.$$ CI.ConduitM CI.idP C.=$ CL.fold (+) 0
             y <- CL.sourceList [1..10 :: Int] C.$$ CL.fold (+) 0
             x `shouldBe` y
         it' "right identity" $ do
@@ -693,9 +652,9 @@ main = hspec $ do
     describe "generalizing" $ do
         it' "works" $ do
             x <-     C.runPipe
-                   $ CI.sourceToPipe  (CL.sourceList [1..10 :: Int])
-               C.>+> CI.conduitToPipe (CL.map (+ 1))
-               C.>+> CI.sinkToPipe    (CL.fold (+) 0)
+                   $ CI.toPipe (CL.sourceList [1..10] :: C.Source IO Int)
+               C.>+> CI.toPipe (CL.map (+ 1) :: C.Conduit Int IO Int)
+               C.>+> CI.toPipe (CL.fold (+) 0 :: C.Sink Int IO Int)
             x `shouldBe` sum [2..11]
 
     describe "withUpstream" $ do
@@ -788,7 +747,7 @@ main = hspec $ do
                     js <- CL.take 2
                     mapM_ C.leftover $ reverse js
                     C.yield i
-            res <- (src C.>+> C.injectLeftovers conduit) C.$$ CL.consume
+            res <- (CI.SourceM $ src C.>+> C.injectLeftovers conduit) C.$$ CL.consume
             res `shouldBe` [1..10]
     describe "up-upstream finalizers" $ do
         let p1 = C.await >>= maybe (return ()) C.yield

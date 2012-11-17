@@ -63,9 +63,12 @@ import Prelude
     )
 import Data.Monoid (Monoid, mempty, mappend)
 import Data.Conduit hiding (Source, Sink, Conduit, Pipe)
-import Data.Conduit.Internal (sourceList, pipeL, pipe)
+import Data.Conduit.Internal (pipeL, pipe)
 import Control.Monad (when, (<=<))
 import Control.Monad.Trans.Class (MonadTrans, lift)
+
+sourceList :: Yield m => [YieldOutput m] -> m ()
+sourceList = Prelude.mapM_ yield
 
 -- | Generate a source from a seed value.
 --

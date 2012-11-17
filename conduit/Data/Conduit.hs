@@ -43,18 +43,6 @@ module Data.Conduit
     , mapInput
     , withUpstream
 
-      -- * Generalized conduit types
-      -- $generalizedConduitTypes
-    , GSource
-    , GSink
-    , GLSink
-    , GInfSink
-    , GLInfSink
-    , GConduit
-    , GLConduit
-    , GInfConduit
-    , GLInfConduit
-
       -- * Flushing
     , Flush (..)
 
@@ -399,32 +387,6 @@ demonstrating them:
 
 -}
 
-{- $generalizedConduitTypes
-
-It's recommended to keep your type signatures as general as possible to
-encourage reuse. For example, a theoretical signature for the @head@ function
-would be:
-
-> head :: Sink a m (Maybe a)
-
-However, doing so would prevent usage of @head@ from inside a @Conduit@, since
-a @Sink@ sets its output type parameter to @Void@. The most general type
-signature would instead be:
-
-> head :: Pipe l a o u m (Maybe a)
-
-However, that signature is much more confusing. To bridge this gap, we also
-provide some generalized conduit types. They follow a simple naming convention:
-
-* They have the same name as their non-generalized types, with a @G@ prepended.
-
-* If they have leftovers, we add an @L@.
-
-* If they consume the entirety of their input stream and return the upstream
-  result, we add @Inf@ to indicate /infinite consumption/.
-
--}
-
 -- Define fixity of all our operators
 infixr 0 $$
 infixl 1 $=
@@ -458,7 +420,7 @@ src $$ sink = do
 --
 -- Since 0.4.0
 ($=) :: Monad m => Source m a -> Conduit a m b -> Source m b
-($=) = pipeL
+SourceM src $= ConduitM conduit = SourceM $ pipeL src conduit
 {-# INLINE ($=) #-}
 
 -- | Right fuse, combining a conduit and a sink together into a new sink.
@@ -470,7 +432,7 @@ src $$ sink = do
 --
 -- Since 0.4.0
 (=$) :: Monad m => Conduit a m b -> Sink b m c -> Sink a m c
-(=$) = pipeL
+ConduitM conduit =$ Sink sink = Sink (pipeL conduit sink)
 {-# INLINE (=$) #-}
 
 -- | Fusion operator, combining two @Conduit@s together into a new @Conduit@.
@@ -481,7 +443,7 @@ src $$ sink = do
 --
 -- Since 0.4.0
 (=$=) :: Monad m => Conduit a m b -> Conduit b m c -> Conduit a m c
-(=$=) = pipeL
+ConduitM l =$= ConduitM r = ConduitM (pipeL l r)
 {-# INLINE (=$=) #-}
 
 
@@ -520,7 +482,7 @@ src $$ sink = do
 --
 -- Since 0.5.0
 ($$+) :: Monad m => Source m a -> Sink a m b -> m (ResumableSource m a, b)
-src $$+ sink = connectResume (ResumableSource src (return ())) sink
+SourceM src $$+ sink = connectResume (ResumableSource src (return ())) sink
 {-# INLINE ($$+) #-}
 
 -- | Continue processing after usage of @$$+@.
