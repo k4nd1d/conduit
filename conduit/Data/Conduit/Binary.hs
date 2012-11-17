@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, RankNTypes #-}
+{-# LANGUAGE CPP, RankNTypes, TypeFamilies #-}
 -- | Functions for interacting with bytes.
 module Data.Conduit.Binary
     ( -- * Files and @Handle@s
@@ -36,7 +36,6 @@ import Prelude hiding (head, take, drop, takeWhile, dropWhile)
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
 import Data.Conduit hiding (Source, Conduit, Sink, Pipe)
-import Data.Conduit.List (sourceList)
 import Control.Exception (assert)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO, MonadIO)
@@ -52,9 +51,9 @@ import qualified System.PosixFile as F
 -- | Stream the contents of a file as binary data.
 --
 -- Since 0.3.0
-sourceFile :: MonadResource m
+sourceFile :: (YieldOutput (t m) ~ S.ByteString, ResourcePipe t, MonadIO (t m), Yield (t m), MonadResource m)
            => FilePath
-           -> GSource m S.ByteString
+           -> t m ()
 sourceFile fp =
 #if CABAL_OS_WINDOWS || NO_HANDLES
     bracketP
@@ -72,9 +71,9 @@ sourceFile fp =
 -- completes, since it did not acquire the @Handle@ in the first place.
 --
 -- Since 0.3.0
-sourceHandle :: MonadIO m
+sourceHandle :: (YieldOutput m ~ S.ByteString, Yield m, MonadIO m)
              => IO.Handle
-             -> GSource m S.ByteString
+             -> m ()
 sourceHandle h =
     loop
   where
@@ -90,18 +89,18 @@ sourceHandle h =
 -- and closed it as soon as possible.
 --
 -- Since 0.3.0
-sourceIOHandle :: MonadResource m
+sourceIOHandle :: (ResourcePipe t, YieldOutput (t m) ~ S.ByteString, Yield (t m), MonadIO (t m), MonadResource m)
                => IO IO.Handle
-               -> GSource m S.ByteString
+               -> t m ()
 sourceIOHandle alloc = bracketP alloc IO.hClose sourceHandle
 
 -- | Stream all incoming data to the given 'IO.Handle'. Note that this function
 -- will /not/ automatically close the @Handle@ when processing completes.
 --
 -- Since 0.3.0
-sinkHandle :: MonadIO m
+sinkHandle :: (AwaitInput m ~ S.ByteString, Await m, MonadIO m)
            => IO.Handle
-           -> GInfSink S.ByteString m
+           -> m (AwaitTerm m)
 sinkHandle h = awaitForever $ liftIO . S.hPut h
 
 -- | An alternative to 'sinkHandle'.
@@ -110,20 +109,20 @@ sinkHandle h = awaitForever $ liftIO . S.hPut h
 -- and close it as soon as possible.
 --
 -- Since 0.3.0
-sinkIOHandle :: MonadResource m
+sinkIOHandle :: (MonadResource m, AwaitInput (t m) ~ S.ByteString, MonadIO (t m), Await (t m), ResourcePipe t)
              => IO IO.Handle
-             -> GInfSink S.ByteString m
+             -> t m (AwaitTerm (t m))
 sinkIOHandle alloc = bracketP alloc IO.hClose sinkHandle
 
 -- | Stream the contents of a file as binary data, starting from a certain
 -- offset and only consuming up to a certain number of bytes.
 --
 -- Since 0.3.0
-sourceFileRange :: MonadResource m
+sourceFileRange :: (MonadResource m, YieldOutput (t m) ~ S.ByteString, Yield (t m), MonadIO (t m), ResourcePipe t)
                 => FilePath
                 -> Maybe Integer -- ^ Offset
                 -> Maybe Integer -- ^ Maximum count
-                -> GSource m S.ByteString
+                -> t m ()
 sourceFileRange fp offset count = bracketP
     (IO.openBinaryFile fp IO.ReadMode)
     IO.hClose
@@ -158,18 +157,18 @@ sourceFileRange fp offset count = bracketP
 -- | Stream all incoming data to the given file.
 --
 -- Since 0.3.0
-sinkFile :: MonadResource m
+sinkFile :: (MonadResource m, AwaitInput (t m) ~ S.ByteString, MonadIO (t m), ResourcePipe t, Await (t m))
          => FilePath
-         -> GInfSink S.ByteString m
+         -> t m (AwaitTerm (t m))
 sinkFile fp = sinkIOHandle (IO.openBinaryFile fp IO.WriteMode)
 
 -- | Stream the contents of the input to a file, and also send it along the
 -- pipeline. Similar in concept to the Unix command @tee@.
 --
 -- Since 0.3.0
-conduitFile :: MonadResource m
+conduitFile :: (MonadResource m, YieldOutput (t m) ~ S.ByteString, AwaitInput (t m) ~ S.ByteString, MonadIO (t m), Yield (t m), Await (t m), ResourcePipe t)
             => FilePath
-            -> GInfConduit S.ByteString m S.ByteString
+            -> t m (AwaitTerm (t m))
 conduitFile fp = bracketP
     (IO.openBinaryFile fp IO.WriteMode)
     IO.hClose
@@ -182,9 +181,9 @@ conduitFile fp = bracketP
 -- consumed.
 --
 -- Since 0.3.0
-isolate :: Monad m
+isolate :: (YieldOutput m ~ S.ByteString, AwaitInput m ~ S.ByteString, Yield m, Leftover m)
         => Int
-        -> GLConduit S.ByteString m S.ByteString
+        -> m ()
 isolate =
     loop
   where
@@ -204,7 +203,8 @@ isolate =
 -- | Return the next byte from the stream, if available.
 --
 -- Since 0.3.0
-head :: Monad m => GLSink S.ByteString m (Maybe Word8)
+head :: (AwaitInput m ~ S.ByteString, Leftover m)
+     => m (Maybe Word8)
 head = do
     mbs <- await
     case mbs of
@@ -217,7 +217,9 @@ head = do
 -- | Return all bytes while the predicate returns @True@.
 --
 -- Since 0.3.0
-takeWhile :: Monad m => (Word8 -> Bool) -> GLConduit S.ByteString m S.ByteString
+takeWhile :: (AwaitInput m ~ S.ByteString, Leftover m, YieldOutput m ~ S.ByteString, Yield m)
+          => (Word8 -> Bool)
+          -> m ()
 takeWhile p =
     loop
   where
@@ -233,7 +235,9 @@ takeWhile p =
 -- | Ignore all bytes while the predicate returns @True@.
 --
 -- Since 0.3.0
-dropWhile :: Monad m => (Word8 -> Bool) -> GLSink S.ByteString m ()
+dropWhile :: (AwaitInput m ~ S.ByteString, Leftover m)
+          => (Word8 -> Bool)
+          -> m ()
 dropWhile p =
     loop
   where
@@ -248,7 +252,9 @@ dropWhile p =
 -- | Take the given number of bytes, if available.
 --
 -- Since 0.3.0
-take :: Monad m => Int -> GLSink S.ByteString m L.ByteString
+take :: (AwaitInput m ~ S.ByteString, Leftover m)
+     => Int
+     -> m L.ByteString
 take n0 =
     go n0 id
   where
@@ -266,7 +272,9 @@ take n0 =
 -- | Drop up to the given number of bytes.
 --
 -- Since 0.5.0
-drop :: Monad m => Int -> GLSink S.ByteString m ()
+drop :: (AwaitInput m ~ S.ByteString, Leftover m)
+     => Int
+     -> m ()
 drop =
     go
   where
@@ -285,7 +293,8 @@ drop =
 -- (10), and strip it from the output.
 --
 -- Since 0.3.0
-lines :: Monad m => GInfConduit S.ByteString m S.ByteString
+lines :: (YieldOutput m ~ S.ByteString, AwaitInput m ~ S.ByteString, Yield m, Await m)
+      => m (AwaitTerm m)
 lines =
     loop id
   where
@@ -307,5 +316,7 @@ lines =
 -- | Stream the chunks from a lazy bytestring.
 --
 -- Since 0.5.0
-sourceLbs :: Monad m => L.ByteString -> GSource m S.ByteString
-sourceLbs = sourceList . L.toChunks
+sourceLbs :: (YieldOutput m ~ S.ByteString, Yield m)
+          => L.ByteString
+          -> m ()
+sourceLbs = mapM_ yield . L.toChunks

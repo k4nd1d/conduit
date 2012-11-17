@@ -26,8 +26,7 @@ module Data.Conduit
     , Yield (..)
     , Leftover (..)
       -- ** Finalization
-    , bracketP
-    , addCleanup
+    , ResourcePipe (..)
 
       -- * Connect-and-resume
       -- $connectAndResume

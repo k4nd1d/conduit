@@ -27,8 +27,7 @@ module Data.Conduit.Internal
     , Yield (..)
     , Leftover (..)
       -- * Finalization
-    , bracketP
-    , addCleanup
+    , ResourcePipe (..)
       -- * Composition
     , idP
     , pipe
@@ -308,44 +307,44 @@ instance Monad m => Leftover (Pipe i i o u m) where
 
 {-# RULES "leftover l >> p" forall l (p :: Pipe l l o u m r). leftover l >> p = Leftover p l #-}
 
--- | Perform some allocation and run an inner @Pipe@. Two guarantees are given
--- about resource finalization:
---
--- 1. It will be /prompt/. The finalization will be run as early as possible.
---
--- 2. It is exception safe. Due to usage of @resourcet@, the finalization will
---    be run in the event of any exceptions.
---
--- Since 0.5.0
-bracketP :: MonadResource m
-         => IO a
-         -> (a -> IO ())
-         -> (a -> Pipe l i o u m r)
-         -> Pipe l i o u m r
-bracketP alloc free inside =
-    PipeM start
-  where
-    start = do
-        (key, seed) <- allocate alloc free
-        return $ addCleanup (const $ release key) (inside seed)
+class ResourcePipe t where
+    -- | Perform some allocation and run an inner @Pipe@. Two guarantees are given
+    -- about resource finalization:
+    --
+    -- 1. It will be /prompt/. The finalization will be run as early as possible.
+    --
+    -- 2. It is exception safe. Due to usage of @resourcet@, the finalization will
+    --    be run in the event of any exceptions.
+    --
+    -- Since 0.5.0
+    bracketP :: MonadResource m => IO a -> (a -> IO ()) -> (a -> t m r) -> t m r
 
--- | Add some code to be run when the given @Pipe@ cleans up.
---
--- Since 0.4.1
-addCleanup :: Monad m
-           => (Bool -> m ()) -- ^ @True@ if @Pipe@ ran to completion, @False@ for early termination.
-           -> Pipe l i o u m r
-           -> Pipe l i o u m r
-addCleanup cleanup (Done r) = PipeM (cleanup True >> return (Done r))
-addCleanup cleanup (HaveOutput src close x) = HaveOutput
-    (addCleanup cleanup src)
-    (cleanup False >> close)
-    x
-addCleanup cleanup (PipeM msrc) = PipeM (liftM (addCleanup cleanup) msrc)
-addCleanup cleanup (NeedInput p c) = NeedInput
-    (addCleanup cleanup . p)
-    (addCleanup cleanup . c)
-addCleanup cleanup (Leftover p i) = Leftover (addCleanup cleanup p) i
+    -- | Add some code to be run when the given @Pipe@ cleans up.
+    --
+    -- Since 0.4.1
+    addCleanup :: Monad m
+               => (Bool -> m ()) -- ^ @True@ if @Pipe@ ran to completion, @False@ for early termination.
+               -> t m r
+               -> t m r
+
+instance ResourcePipe (Pipe l i o u) where
+    bracketP alloc free inside =
+        PipeM start
+      where
+        start = do
+            (key, seed) <- allocate alloc free
+            return $ addCleanup (const $ release key) (inside seed)
+
+    addCleanup cleanup (Done r) = PipeM (cleanup True >> return (Done r))
+    addCleanup cleanup (HaveOutput src close x) = HaveOutput
+        (addCleanup cleanup src)
+        (cleanup False >> close)
+        x
+    addCleanup cleanup (PipeM msrc) = PipeM (liftM (addCleanup cleanup) msrc)
+    addCleanup cleanup (NeedInput p c) = NeedInput
+        (addCleanup cleanup . p)
+        (addCleanup cleanup . c)
+    addCleanup cleanup (Leftover p i) = Leftover (addCleanup cleanup p) i
 
 -- | The identity @Pipe@.
 --
@@ -583,9 +582,9 @@ conduitToPipe =
 -- will force consumption of the entire input stream.
 --
 -- Since 0.5.0
-withUpstream :: Monad m
-             => Pipe l i o u m r
-             -> Pipe l i o u m (u, r)
+withUpstream :: (u ~ AwaitTerm m, Await m)
+             => m r
+             -> m (u, r)
 withUpstream down =
     down >>= go
   where
