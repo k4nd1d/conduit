@@ -21,12 +21,10 @@ module Data.Conduit
 
       -- * Primitives
       -- $primitives
-    , await
-    , awaitE
+    , Await (..)
     , awaitForever
-    , yield
-    , yieldOr
-    , leftover
+    , Yield (..)
+    , Leftover (..)
       -- ** Finalization
     , bracketP
     , addCleanup

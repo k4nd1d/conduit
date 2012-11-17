@@ -4,6 +4,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeFamilies #-}
 module Data.Conduit.Internal
     ( -- * Types
       Pipe (..)
@@ -21,12 +22,10 @@ module Data.Conduit.Internal
     , GLInfConduit
     , ResumableSource (..)
       -- * Primitives
-    , await
-    , awaitE
+    , Await (..)
     , awaitForever
-    , yield
-    , yieldOr
-    , leftover
+    , Yield (..)
+    , Leftover (..)
       -- * Finalization
     , bracketP
     , addCleanup
@@ -211,73 +210,103 @@ type GLInfConduit i m o = forall r. Pipe i i o r m r
 -- Since 0.5.0
 data ResumableSource m o = ResumableSource (Source m o) (m ())
 
--- | Wait for a single input value from upstream, terminating immediately if no
--- data is available.
---
--- Since 0.5.0
-await :: Pipe l i o u m (Maybe i)
-await = NeedInput (Done . Just) (\_ -> Done Nothing)
-{-# RULES "await >>= maybe" forall x y. await >>= maybe x y = NeedInput y (const x) #-}
-{-# INLINE [1] await #-}
+class Monad m => Await m where
+    type AwaitInput m
+    type AwaitTerm m
 
--- | This is similar to @await@, but will return the upstream result value as
--- @Left@ if available.
---
--- Since 0.5.0
-awaitE :: Pipe l i o u m (Either u i)
-awaitE = NeedInput (Done . Right) (Done . Left)
+    -- | Wait for a single input value from upstream, terminating immediately if no
+    -- data is available.
+    --
+    -- Since 0.5.0
+    await :: m (Maybe (AwaitInput m))
+
+    -- | This is similar to @await@, but will return the upstream result value as
+    -- @Left@ if available.
+    --
+    -- Since 0.5.0
+    awaitE :: m (Either (AwaitTerm m) (AwaitInput m))
+
+instance Monad m => Await (Pipe l i o u m) where
+    type AwaitInput (Pipe l i o u m) = i
+    type AwaitTerm (Pipe l i o u m) = u
+
+    await = NeedInput (Done . Just) (\_ -> Done Nothing)
+    {-# INLINE [1] await #-}
+
+    awaitE = NeedInput (Done . Right) (Done . Left)
+    {-# INLINE [1] awaitE #-}
+
+{-# RULES "await >>= maybe" forall x y. await >>= maybe x y = NeedInput y (const x) #-}
 {-# RULES "awaitE >>= either" forall x y. awaitE >>= either x y = NeedInput y x #-}
-{-# INLINE [1] awaitE #-}
 
 -- | Wait for input forever, calling the given inner @Pipe@ for each piece of
 -- new input. Returns the upstream result type.
 --
 -- Since 0.5.0
-awaitForever :: Monad m => (i -> Pipe l i o r m r') -> Pipe l i o r m r
+awaitForever :: (Await m, r ~ AwaitTerm m)
+             => (AwaitInput m -> m r')
+             -> m r -- Monad m => (i -> Pipe l i o r m r') -> Pipe l i o r m r
 awaitForever inner =
     self
   where
     self = awaitE >>= either return (\i -> inner i >> self)
 {-# INLINE [1] awaitForever #-}
 
--- | Send a single output value downstream. If the downstream @Pipe@
--- terminates, this @Pipe@ will terminate as well.
---
--- Since 0.5.0
-yield :: Monad m
-      => o -- ^ output value
-      -> Pipe l i o u m ()
-yield = HaveOutput (Done ()) (return ())
-{-# INLINE [1] yield #-}
+class Monad m => Yield m where
+    type YieldOutput m
+    type YieldFinalizer m
 
--- | Similar to @yield@, but additionally takes a finalizer to be run if the
--- downstream @Pipe@ terminates.
---
--- Since 0.5.0
-yieldOr :: Monad m
-        => o
-        -> m () -- ^ finalizer
-        -> Pipe l i o u m ()
-yieldOr o f = HaveOutput (Done ()) f o
-{-# INLINE [1] yieldOr #-}
+    -- | Send a single output value downstream. If the downstream @Pipe@
+    -- terminates, this @Pipe@ will terminate as well.
+    --
+    -- Since 0.5.0
+    yield :: YieldOutput m -> m ()
+
+    -- | Similar to @yield@, but additionally takes a finalizer to be run if the
+    -- downstream @Pipe@ terminates.
+    --
+    -- Since 0.5.0
+    yieldOr :: YieldOutput m -> YieldFinalizer m -> m ()
+
+instance Monad m => Yield (Pipe l i o u m) where
+    type YieldOutput (Pipe l i o u m) = o
+    type YieldFinalizer (Pipe l i o u m) = m ()
+
+    yield = yield'
+    {-# INLINE yield #-}
+
+    yieldOr = yieldOr'
+    {-# INLINE yieldOr #-}
+
+yield' :: Monad m => o -> Pipe l i o u m ()
+yield' = HaveOutput (Done ()) (return ())
+{-# INLINE [1] yield' #-}
+
+yieldOr' :: Monad m => o -> m () -> Pipe l i o u m ()
+yieldOr' o f = HaveOutput (Done ()) f o
+{-# INLINE [1] yieldOr' #-}
 
 {-# RULES
-    "yield o >> p" forall o (p :: Pipe l i o u m r). yield o >> p = HaveOutput p (return ()) o
-  ; "mapM_ yield" mapM_ yield = sourceList
-  ; "yieldOr o c >> p" forall o c (p :: Pipe l i o u m r). yieldOr o c >> p = HaveOutput p c o
+    "yield o >> p" forall o (p :: Pipe l i o u m r). yield' o >> p = HaveOutput p (return ()) o
+  ; "mapM_ yield" mapM_ yield' = sourceList
+  ; "yieldOr o c >> p" forall o c (p :: Pipe l i o u m r). yieldOr' o c >> p = HaveOutput p c o
   #-}
 
--- | Provide a single piece of leftover input to be consumed by the next pipe
--- in the current monadic binding.
---
--- /Note/: it is highly encouraged to only return leftover values from input
--- already consumed from upstream.
---
--- Since 0.5.0
-leftover :: l -> Pipe l i o u m ()
-leftover = Leftover (Done ())
-{-# INLINE [1] leftover #-}
-{-# RULES "leftover l >> p" forall l (p :: Pipe l i o u m r). leftover l >> p = Leftover p l #-}
+class Await m => Leftover m where
+    -- | Provide a single piece of leftover input to be consumed by the next pipe
+    -- in the current monadic binding.
+    --
+    -- /Note/: it is highly encouraged to only return leftover values from input
+    -- already consumed from upstream.
+    --
+    -- Since 0.5.0
+    leftover :: AwaitInput m -> m ()
+
+instance Monad m => Leftover (Pipe i i o u m) where
+    leftover = Leftover (Done ())
+    {-# INLINE [1] leftover #-}
+
+{-# RULES "leftover l >> p" forall l (p :: Pipe l l o u m r). leftover l >> p = Leftover p l #-}
 
 -- | Perform some allocation and run an inner @Pipe@. Two guarantees are given
 -- about resource finalization:
