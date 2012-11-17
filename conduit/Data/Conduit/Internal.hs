@@ -540,6 +540,10 @@ instance (Monad m, m ~ m2) => MapOutput (SourceM o1 m) (SourceM o2 m2) o1 o2 whe
     mapOutput f (SourceM m) = SourceM (mapOutput f m)
     mapOutputMaybe f (SourceM m) = SourceM (mapOutputMaybe f m)
 
+instance (Monad m, m ~ m2, i1 ~ i2) => MapOutput (ConduitM i1 o1 m) (ConduitM i2 o2 m2) o1 o2 where
+    mapOutput f (ConduitM m) = ConduitM (mapOutput f m)
+    mapOutputMaybe f (ConduitM m) = ConduitM (mapOutputMaybe f m)
+
 class MapInput m1 m2 where
     -- | Apply a function to all the input values of a @Pipe@.
     --
@@ -549,15 +553,18 @@ class MapInput m1 m2 where
              -> m2 r
              -> m1 r
 
-instance Monad m => MapInput (Pipe i1 i1 o u m) (Pipe i2 i2 o u m) where
+instance (Monad m, o1 ~ o2, u1 ~ u2, m ~ m2) => MapInput (Pipe i1 i1 o1 u1 m) (Pipe i2 i2 o2 u2 m2) where
     mapInput f f' (HaveOutput p c o) = HaveOutput (mapInput f f' p) c o
     mapInput f f' (NeedInput p c)    = NeedInput (mapInput f f' . p . f) (mapInput f f' . c)
     mapInput _ _  (Done r)           = Done r
     mapInput f f' (PipeM mp)         = PipeM (liftM (mapInput f f') mp)
     mapInput f f' (Leftover p i)     = maybe id (flip Leftover) (f' i) $ mapInput f f' p
 
-instance Monad m => MapInput (Sink i1 m) (Sink i2 m) where
+instance (Monad m, m ~ m2) => MapInput (Sink i1 m) (Sink i2 m2) where
     mapInput f f' (Sink s1) = Sink $ mapInput f f' s1
+
+instance (Monad m, o1 ~ o2, m ~ m2) => MapInput (ConduitM i1 o1 m) (ConduitM i2 o2 m2) where
+    mapInput f f' (ConduitM p) = ConduitM $ mapInput f f' p
 
 -- | Convert a list into a source.
 --
