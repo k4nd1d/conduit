@@ -63,7 +63,7 @@ import Prelude
     )
 import Data.Monoid (Monoid, mempty, mappend)
 import Data.Conduit hiding (Source, Sink, Conduit, Pipe)
-import Data.Conduit.Internal (pipeL, pipe)
+import Data.Conduit.Internal (pipe)
 import Control.Monad (when, (<=<))
 import Control.Monad.Trans.Class (MonadTrans, lift)
 
@@ -213,7 +213,7 @@ head = await
 -- change the state of the stream.
 --
 -- Since 0.3.0
-peek :: Leftover m
+peek :: Await m
      => m (Maybe (AwaitInput m))
 peek = await >>= maybe (return Nothing) (\x -> leftover x >> return (Just x))
 
@@ -230,12 +230,10 @@ map f = awaitForever $ yield . f
 It might be nice to include these rewrite rules, but they may have subtle
 differences based on leftovers.
 
-{-# RULES "map-to-mapOutput pipeL" forall f src. pipeL src (map f) = mapOutput f src #-}
 {-# RULES "map-to-mapOutput $=" forall f src. src $= (map f) = mapOutput f src #-}
 {-# RULES "map-to-mapOutput pipe" forall f src. pipe src (map f) = mapOutput f src #-}
 {-# RULES "map-to-mapOutput >+>" forall f src. src >+> (map f) = mapOutput f src #-}
 
-{-# RULES "map-to-mapInput pipeL" forall f sink. pipeL (map f) sink = mapInput f (Prelude.const Prelude.Nothing) sink #-}
 {-# RULES "map-to-mapInput =$" forall f sink. map f =$ sink = mapInput f (Prelude.const Prelude.Nothing) sink #-}
 {-# RULES "map-to-mapInput pipe" forall f sink. pipe (map f) sink = mapInput f (Prelude.const Prelude.Nothing) sink #-}
 {-# RULES "map-to-mapInput >+>" forall f sink. map f >+> sink = mapInput f (Prelude.const Prelude.Nothing) sink #-}
@@ -417,7 +415,7 @@ sourceNull = return ()
 -- when no more input is available from upstream.
 --
 -- Since 0.5.0
-sequence :: (Yield m, Leftover m)
+sequence :: (Yield m, Await m)
          => m (YieldOutput m)
          -> m (AwaitTerm m)
 sequence sink =

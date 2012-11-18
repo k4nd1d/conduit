@@ -181,7 +181,7 @@ conduitFile fp = bracketP
 -- consumed.
 --
 -- Since 0.3.0
-isolate :: (YieldOutput m ~ S.ByteString, AwaitInput m ~ S.ByteString, Yield m, Leftover m)
+isolate :: (YieldOutput m ~ S.ByteString, AwaitInput m ~ S.ByteString, Yield m, Await m)
         => Int
         -> m ()
 isolate =
@@ -203,7 +203,7 @@ isolate =
 -- | Return the next byte from the stream, if available.
 --
 -- Since 0.3.0
-head :: (AwaitInput m ~ S.ByteString, Leftover m)
+head :: (AwaitInput m ~ S.ByteString, Await m)
      => m (Maybe Word8)
 head = do
     mbs <- await
@@ -217,7 +217,7 @@ head = do
 -- | Return all bytes while the predicate returns @True@.
 --
 -- Since 0.3.0
-takeWhile :: (AwaitInput m ~ S.ByteString, Leftover m, YieldOutput m ~ S.ByteString, Yield m)
+takeWhile :: (AwaitInput m ~ S.ByteString, YieldOutput m ~ S.ByteString, Yield m, Await m)
           => (Word8 -> Bool)
           -> m ()
 takeWhile p =
@@ -235,7 +235,7 @@ takeWhile p =
 -- | Ignore all bytes while the predicate returns @True@.
 --
 -- Since 0.3.0
-dropWhile :: (AwaitInput m ~ S.ByteString, Leftover m)
+dropWhile :: (AwaitInput m ~ S.ByteString, Await m)
           => (Word8 -> Bool)
           -> m ()
 dropWhile p =
@@ -252,7 +252,7 @@ dropWhile p =
 -- | Take the given number of bytes, if available.
 --
 -- Since 0.3.0
-take :: (AwaitInput m ~ S.ByteString, Leftover m)
+take :: (AwaitInput m ~ S.ByteString, Await m)
      => Int
      -> m L.ByteString
 take n0 =
@@ -272,7 +272,7 @@ take n0 =
 -- | Drop up to the given number of bytes.
 --
 -- Since 0.5.0
-drop :: (AwaitInput m ~ S.ByteString, Leftover m)
+drop :: (AwaitInput m ~ S.ByteString, Await m)
      => Int
      -> m ()
 drop =

@@ -24,7 +24,6 @@ module Data.Conduit
     , Await (..)
     , awaitForever
     , Yield (..)
-    , Leftover (..)
       -- ** Finalization
     , ResourcePipe (..)
 
@@ -61,7 +60,6 @@ module Data.Conduit
 
 import Control.Monad.Trans.Resource
 import Data.Conduit.Internal
-import Data.Void (Void)
 
 {- $conduitInterface
 
@@ -420,7 +418,7 @@ src $$ sink = do
 --
 -- Since 0.4.0
 ($=) :: Monad m => Source m a -> Conduit a m b -> Source m b
-SourceM src $= ConduitM conduit = SourceM $ pipeL src conduit
+SourceM src $= ConduitM conduit = SourceM $ pipe src conduit
 {-# INLINE ($=) #-}
 
 -- | Right fuse, combining a conduit and a sink together into a new sink.
@@ -432,7 +430,7 @@ SourceM src $= ConduitM conduit = SourceM $ pipeL src conduit
 --
 -- Since 0.4.0
 (=$) :: Monad m => Conduit a m b -> Sink b m c -> Sink a m c
-ConduitM conduit =$ Sink sink = Sink (pipeL conduit sink)
+ConduitM conduit =$ Sink sink = Sink (pipe conduit sink)
 {-# INLINE (=$) #-}
 
 -- | Fusion operator, combining two @Conduit@s together into a new @Conduit@.
@@ -443,7 +441,7 @@ ConduitM conduit =$ Sink sink = Sink (pipeL conduit sink)
 --
 -- Since 0.4.0
 (=$=) :: Monad m => Conduit a m b -> Conduit b m c -> Conduit a m c
-ConduitM l =$= ConduitM r = ConduitM (pipeL l r)
+ConduitM l =$= ConduitM r = ConduitM (pipe l r)
 {-# INLINE (=$=) #-}
 
 
@@ -462,14 +460,14 @@ ConduitM l =$= ConduitM r = ConduitM (pipeL l r)
 -- (Just 1,55)
 --
 -- Since 0.5.0
-(>+>) :: Monad m => Pipe l a b r0 m r1 -> Pipe Void b c r1 m r2 -> Pipe l a c r0 m r2
+(>+>) :: Monad m => Pipe a b r0 m r1 -> Pipe b c r1 m r2 -> Pipe a c r0 m r2
 (>+>) = pipe
 {-# INLINE (>+>) #-}
 
 -- | Same as '>+>', but reverse the order of the arguments.
 --
 -- Since 0.5.0
-(<+<) :: Monad m => Pipe Void b c r1 m r2 -> Pipe l a b r0 m r1 -> Pipe l a c r0 m r2
+(<+<) :: Monad m => Pipe b c r1 m r2 -> Pipe a b r0 m r1 -> Pipe a c r0 m r2
 (<+<) = flip pipe
 {-# INLINE (<+<) #-}
 

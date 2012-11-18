@@ -614,26 +614,26 @@ main = hspec $ do
 
     describe "upstream results" $ do
         it' "works" $ do
-            let foldUp :: (b -> a -> b) -> b -> C.Pipe l a Void u IO (u, b)
+            let foldUp :: (b -> a -> b) -> b -> C.Pipe a Void u IO (u, b)
                 foldUp f b = C.awaitE >>= either (\u -> return (u, b)) (\a -> let b' = f b a in b' `seq` foldUp f b')
-                passFold :: (b -> a -> b) -> b -> C.Pipe l a a () IO b
+                passFold :: (b -> a -> b) -> b -> C.Pipe a a () IO b
                 passFold f b = C.await >>= maybe (return b) (\a -> let b' = f b a in b' `seq` C.yield a >> passFold f b')
             (x, y) <- CI.runPipe $ CL.sourceList [1..10 :: Int] C.>+> passFold (+) 0 C.>+>  foldUp (*) 1
             (x, y) `shouldBe` (sum [1..10], product [1..10])
 
     describe "input/output mapping" $ do
         it' "mapOutput" $ do
-            x <- CI.mapOutput (+ 1) (CL.sourceList [1..10 :: Int]) C.$$ CL.fold (+) 0
+            x <- CI.fromPipe (CI.mapOutput (+ 1) (CL.sourceList [1..10 :: Int])) C.$$ CL.fold (+) 0
             x `shouldBe` sum [2..11]
         it' "mapOutputMaybe" $ do
-            x <- CI.mapOutputMaybe (\i -> if even i then Just i else Nothing) (CL.sourceList [1..10 :: Int]) C.$$ CL.fold (+) 0
+            x <- CI.fromPipe (CI.mapOutputMaybe (\i -> if even i then Just i else Nothing) (CL.sourceList [1..10 :: Int])) C.$$ CL.fold (+) 0
             x `shouldBe` sum [2, 4..10]
         it' "mapInput" $ do
             xyz <- (mapM_ C.yield $ map show [1..10 :: Int]) C.$$ do
-                (x, y) <- CI.mapInput read (Just . show) $ ((do
-                    x <- CL.isolate 5 C.=$ CL.fold (+) 0
+                (x, y) <- CI.fromPipe $ CI.mapInput read (Just . show) $ ((do
+                    x <- CL.isolate 5 C.>+> CL.fold (+) 0
                     y <- CL.peek
-                    return (x :: Int, y :: Maybe Int)) :: C.Sink Int IO (Int, Maybe Int))
+                    return (x :: Int, y :: Maybe Int)))
                 z <- CL.consume
                 return (x, y, concat z)
 

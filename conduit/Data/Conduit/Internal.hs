@@ -20,22 +20,22 @@ module Data.Conduit.Internal
     , Await (..)
     , awaitForever
     , Yield (..)
-    , Leftover (..)
       -- * Finalization
     , ResourcePipe (..)
       -- * Composition
     , idP
     , pipe
-    , pipeL
     , connectResume
     , runPipe
     , injectLeftovers
       -- * Generalizing
     , ToPipe (..)
+    , fromPipe
       -- * Utilities
     , transPipe
-    , MapOutput (..)
-    , MapInput (..)
+    , mapOutput
+    , mapOutputMaybe
+    , mapInput
     , sourceList
     , withUpstream
     , unwrapResumable
@@ -76,30 +76,30 @@ import qualified Data.IORef as I
 -- parameters.
 --
 -- Since 0.5.0
-data Pipe l i o u m r =
+data Pipe i o u m r =
     -- | Provide new output to be sent downstream. This constructor has three
     -- fields: the next @Pipe@ to be used, a finalization function, and the
     -- output value.
-    HaveOutput (Pipe l i o u m r) (m ()) o
+    HaveOutput (Pipe i o u m r) (m ()) o
     -- | Request more input from upstream. The first field takes a new input
     -- value and provides a new @Pipe@. The second takes an upstream result
     -- value, which indicates that upstream is producing no more results.
-  | NeedInput (i -> Pipe l i o u m r) (u -> Pipe l i o u m r)
+  | NeedInput (i -> Pipe i o u m r) (u -> Pipe i o u m r)
     -- | Processing with this @Pipe@ is complete, providing the final result.
   | Done r
     -- | Require running of a monadic action to get the next @Pipe@.
-  | PipeM (m (Pipe l i o u m r))
+  | PipeM (m (Pipe i o u m r))
     -- | Return leftover input, which should be provided to future operations.
-  | Leftover (Pipe l i o u m r) l
+  | Leftover (Pipe i o u m r) i
 
-instance Monad m => Functor (Pipe l i o u m) where
+instance Monad m => Functor (Pipe i o u m) where
     fmap = liftM
 
-instance Monad m => Applicative (Pipe l i o u m) where
+instance Monad m => Applicative (Pipe i o u m) where
     pure = return
     (<*>) = ap
 
-instance Monad m => Monad (Pipe l i o u m) where
+instance Monad m => Monad (Pipe i o u m) where
     return = Done
 
     Done x           >>= fp = fp x
@@ -108,25 +108,22 @@ instance Monad m => Monad (Pipe l i o u m) where
     PipeM mp         >>= fp = PipeM      ((>>= fp) `liftM` mp)
     Leftover p i     >>= fp = Leftover   (p >>= fp)            i
 
-instance MonadBase base m => MonadBase base (Pipe l i o u m) where
+instance MonadBase base m => MonadBase base (Pipe i o u m) where
     liftBase = lift . liftBase
 
-instance MonadTrans (Pipe l i o u) where
+instance MonadTrans (Pipe i o u) where
     lift mr = PipeM (Done `liftM` mr)
 
-instance MonadIO m => MonadIO (Pipe l i o u m) where
+instance MonadIO m => MonadIO (Pipe i o u m) where
     liftIO = lift . liftIO
 
-instance MonadUnsafeIO m => MonadUnsafeIO (Pipe l i o u m) where
-    unsafeLiftIO = lift . unsafeLiftIO
-
-instance MonadThrow m => MonadThrow (Pipe l i o u m) where
+instance MonadThrow m => MonadThrow (Pipe i o u m) where
     monadThrow = lift . monadThrow
 
-instance MonadActive m => MonadActive (Pipe l i o u m) where
+instance MonadActive m => MonadActive (Pipe i o u m) where
     monadActive = lift monadActive
 
-instance Monad m => Monoid (Pipe l i o u m ()) where
+instance Monad m => Monoid (Pipe i o u m ()) where
     mempty = return ()
     mappend = (>>)
 instance Monad m => Monoid (SourceM o m ()) where
@@ -142,14 +139,14 @@ instance Monad m => Monoid (Sink i m ()) where
 -- Since 0.6.0
 type Source m o = SourceM o m ()
 
-newtype SourceM o m r = SourceM { unSourceM :: Pipe () () o () m r }
+newtype SourceM o m r = SourceM { unSourceM :: Pipe () o () m r }
     deriving (Functor, Applicative, Monad, MonadTrans, MonadIO, ResourcePipe, MonadThrow)
 
 -- | Consumes a stream of input values and produces a final result, without
 -- producing any output.
 --
 -- Since 0.6.0
-newtype Sink i m r = Sink { unSink :: Pipe i i Void () m r }
+newtype Sink i m r = Sink { unSink :: Pipe i Void () m r }
     deriving (Functor, Applicative, Monad, MonadTrans, MonadIO, ResourcePipe, MonadThrow)
 
 -- | Consumes a stream of input values and produces a stream of output values,
@@ -158,7 +155,7 @@ newtype Sink i m r = Sink { unSink :: Pipe i i Void () m r }
 -- Since 0.6.0
 type Conduit i m o = ConduitM i o m ()
 
-newtype ConduitM i o m r = ConduitM { unConduitM :: Pipe i i o () m r }
+newtype ConduitM i o m r = ConduitM { unConduitM :: Pipe i o () m r }
     deriving (Functor, Applicative, Monad, MonadTrans, MonadIO, ResourcePipe, MonadThrow)
 
 -- | A @Source@ which has been started, but has not yet completed.
@@ -167,7 +164,7 @@ newtype ConduitM i o m r = ConduitM { unConduitM :: Pipe i i o () m r }
 -- to be run to close it.
 --
 -- Since 0.5.0
-data ResumableSource m o = ResumableSource (Pipe () () o () m ()) (m ())
+data ResumableSource m o = ResumableSource (Pipe () o () m ()) (m ())
 
 class Monad m => Await m where
     type AwaitInput m
@@ -185,9 +182,18 @@ class Monad m => Await m where
     -- Since 0.5.0
     awaitE :: m (Either (AwaitTerm m) (AwaitInput m))
 
-instance Monad m => Await (Pipe l i o u m) where
-    type AwaitInput (Pipe l i o u m) = i
-    type AwaitTerm (Pipe l i o u m) = u
+    -- | Provide a single piece of leftover input to be consumed by the next pipe
+    -- in the current monadic binding.
+    --
+    -- /Note/: it is highly encouraged to only return leftover values from input
+    -- already consumed from upstream.
+    --
+    -- Since 0.5.0
+    leftover :: AwaitInput m -> m ()
+
+instance Monad m => Await (Pipe i o u m) where
+    type AwaitInput (Pipe i o u m) = i
+    type AwaitTerm (Pipe i o u m) = u
 
     await = NeedInput (Done . Just) (\_ -> Done Nothing)
     {-# INLINE [1] await #-}
@@ -195,19 +201,47 @@ instance Monad m => Await (Pipe l i o u m) where
     awaitE = NeedInput (Done . Right) (Done . Left)
     {-# INLINE [1] awaitE #-}
 
+    leftover = Leftover (Done ())
+    {-# INLINE [1] leftover #-}
+
+instance Monad m => Await (SourceM o m) where
+    type AwaitInput (SourceM o m) = ()
+    type AwaitTerm (SourceM o m) = ()
+
+    await = SourceM await
+    {-# INLINE await #-}
+
+    awaitE = SourceM awaitE
+    {-# INLINE awaitE #-}
+
+    leftover = SourceM . leftover
+    {-# INLINE leftover #-}
+
 instance Monad m => Await (ConduitM i o m) where
     type AwaitInput (ConduitM i o m) = i
     type AwaitTerm (ConduitM i o m) = ()
 
     await = ConduitM await
+    {-# INLINE await #-}
+
     awaitE = ConduitM awaitE
+    {-# INLINE awaitE #-}
+
+    leftover = ConduitM . leftover
+    {-# INLINE leftover #-}
 
 instance Monad m => Await (Sink i m) where
     type AwaitInput (Sink i m) = i
     type AwaitTerm (Sink i m) = ()
 
     await = Sink await
+    {-# INLINE await #-}
+
     awaitE = Sink awaitE
+    {-# INLINE awaitE #-}
+
+    leftover = Sink . leftover
+    {-# INLINE leftover #-}
 
 {-# RULES "await >>= maybe" forall x y. await >>= maybe x y = NeedInput y (const x) #-}
 {-# RULES "awaitE >>= either" forall x y. awaitE >>= either x y = NeedInput y x #-}
@@ -218,7 +252,7 @@ instance Monad m => Await (Sink i m) where
 -- Since 0.5.0
 awaitForever :: (Await m, r ~ AwaitTerm m)
              => (AwaitInput m -> m r')
-             -> m r -- Monad m => (i -> Pipe l i o r m r') -> Pipe l i o r m r
+             -> m r
 awaitForever inner =
     self
   where
@@ -241,9 +275,9 @@ class Monad m => Yield m where
     -- Since 0.5.0
     yieldOr :: YieldOutput m -> YieldFinalizer m -> m ()
 
-instance Monad m => Yield (Pipe l i o u m) where
-    type YieldOutput (Pipe l i o u m) = o
-    type YieldFinalizer (Pipe l i o u m) = m ()
+instance Monad m => Yield (Pipe i o u m) where
+    type YieldOutput (Pipe i o u m) = o
+    type YieldFinalizer (Pipe i o u m) = m ()
 
     yield = yield'
     {-# INLINE yield #-}
@@ -271,43 +305,32 @@ instance Monad m => Yield (ConduitM i o m) where
     yieldOr a = ConduitM . yieldOr a
     {-# INLINE yieldOr #-}
 
-yield' :: Monad m => o -> Pipe l i o u m ()
+instance Monad m => Yield (Sink i m) where
+    type YieldOutput (Sink i m) = Void
+    type YieldFinalizer (Sink i m) = m ()
+
+    yield = Sink . yield
+    {-# INLINE yield #-}
+
+    yieldOr a = Sink . yieldOr a
+    {-# INLINE yieldOr #-}
+
+
+yield' :: Monad m => o -> Pipe i o u m ()
 yield' = HaveOutput (Done ()) (return ())
 {-# INLINE [1] yield' #-}
 
-yieldOr' :: Monad m => o -> m () -> Pipe l i o u m ()
+yieldOr' :: Monad m => o -> m () -> Pipe i o u m ()
 yieldOr' o f = HaveOutput (Done ()) f o
 {-# INLINE [1] yieldOr' #-}
 
 {-# RULES
-    "yield o >> p" forall o (p :: Pipe l i o u m r). yield' o >> p = HaveOutput p (return ()) o
+    "yield o >> p" forall o (p :: Pipe i o u m r). yield' o >> p = HaveOutput p (return ()) o
   ; "mapM_ yield" mapM_ yield' = sourceList
-  ; "yieldOr o c >> p" forall o c (p :: Pipe l i o u m r). yieldOr' o c >> p = HaveOutput p c o
+  ; "yieldOr o c >> p" forall o c (p :: Pipe i o u m r). yieldOr' o c >> p = HaveOutput p c o
   #-}
 
-class Await m => Leftover m where
-    -- | Provide a single piece of leftover input to be consumed by the next pipe
-    -- in the current monadic binding.
-    --
-    -- /Note/: it is highly encouraged to only return leftover values from input
-    -- already consumed from upstream.
-    --
-    -- Since 0.5.0
-    leftover :: AwaitInput m -> m ()
-
-instance Monad m => Leftover (Pipe i i o u m) where
-    leftover = Leftover (Done ())
-    {-# INLINE [1] leftover #-}
-
-instance Monad m => Leftover (Sink i m) where
-    leftover = Sink . leftover
-    {-# INLINE leftover #-}
-
-instance Monad m => Leftover (ConduitM i o m) where
-    leftover = ConduitM . leftover
-    {-# INLINE leftover #-}
-
-{-# RULES "leftover l >> p" forall l (p :: Pipe l l o u m r). leftover l >> p = Leftover p l #-}
+{-# RULES "leftover l >> p" forall l (p :: Pipe l o u m r). leftover l >> p = Leftover p l #-}
 
 class ResourcePipe t where
     -- | Perform some allocation and run an inner @Pipe@. Two guarantees are given
@@ -329,7 +352,7 @@ class ResourcePipe t where
                -> t m r
                -> t m r
 
-instance ResourcePipe (Pipe l i o u) where
+instance ResourcePipe (Pipe i o u) where
     bracketP alloc free inside =
         PipeM start
       where
@@ -351,48 +374,18 @@ instance ResourcePipe (Pipe l i o u) where
 -- | The identity @Pipe@.
 --
 -- Since 0.5.0
-idP :: Monad m => Pipe l a a r m r
+idP :: Monad m => Pipe a a r m r
 idP = NeedInput (HaveOutput idP (return ())) Done
 
 -- | Compose a left and right pipe together into a complete pipe. The left pipe
 -- will be automatically closed when the right pipe finishes.
 --
--- Since 0.5.0
-pipe :: Monad m => Pipe l a b r0 m r1 -> Pipe Void b c r1 m r2 -> Pipe l a c r0 m r2
+-- Since 0.6.0
+pipe :: Monad m => Pipe a b r0 m r1 -> Pipe b c r1 m r2 -> Pipe a c r0 m r2
 pipe =
     pipe' (return ())
   where
-    pipe' final left right =
-        case right of
-            Done r2 -> PipeM (final >> return (Done r2))
-            HaveOutput p c o -> HaveOutput (pipe' final left p) (c >> final) o
-            PipeM mp -> PipeM (liftM (pipe' final left) mp)
-            Leftover _ i -> absurd i
-            NeedInput rp rc -> upstream rp rc
-      where
-        upstream rp rc =
-            case left of
-                Done r1 -> pipe (Done r1) (rc r1)
-                HaveOutput left' final' o -> pipe' final' left' (rp o)
-                PipeM mp -> PipeM (liftM (\left' -> pipe' final left' right) mp)
-                Leftover left' i -> Leftover (pipe' final left' right) i
-                NeedInput left' lc -> NeedInput
-                    (\a -> pipe' final (left' a) right)
-                    (\r0 -> pipe' final (lc r0) right)
-
--- | Same as 'pipe', but automatically applies 'injectLeftovers' to the right @Pipe@.
---
--- Since 0.5.0
-pipeL :: Monad m => Pipe l a b r0 m r1 -> Pipe b b c r1 m r2 -> Pipe l a c r0 m r2
--- Note: The following should be equivalent to the simpler:
---
---     pipeL l r = l `pipe` injectLeftovers r
---
--- However, this version tested as being significantly more efficient.
-pipeL =
-    pipe' (return ())
-  where
-    pipe' :: Monad m => m () -> Pipe l a b r0 m r1 -> Pipe b b c r1 m r2 -> Pipe l a c r0 m r2
+    pipe' :: Monad m => m () -> Pipe a b r0 m r1 -> Pipe b c r1 m r2 -> Pipe a c r0 m r2
     pipe' final left right =
         case right of
             Done r2 -> PipeM (final >> return (Done r2))
@@ -440,12 +433,12 @@ connectResume (ResumableSource left0 leftFinal0) (Sink sink0) =
 -- | Run a pipeline until processing completes.
 --
 -- Since 0.5.0
-runPipe :: Monad m => Pipe Void () Void () m r -> m r
+runPipe :: Monad m => Pipe () Void () m r -> m r
 runPipe (HaveOutput _ _ o) = absurd o
 runPipe (NeedInput _ c) = runPipe (c ())
 runPipe (Done r) = return r
 runPipe (PipeM mp) = mp >>= runPipe
-runPipe (Leftover _ i) = absurd i
+runPipe (Leftover p _) = runPipe p
 
 -- | Transforms a @Pipe@ that provides leftovers to one which does not,
 -- allowing it to be composed.
@@ -455,7 +448,7 @@ runPipe (Leftover _ i) = absurd i
 -- remainder are discarded.
 --
 -- Since 0.5.0
-injectLeftovers :: Monad m => Pipe i i o u m r -> Pipe l i o u m r
+injectLeftovers :: Monad m => Pipe i o u m r -> Pipe i o u m r
 injectLeftovers =
     go []
   where
@@ -478,7 +471,7 @@ class TransPipe t where
     -- Since 0.4.0
     transPipe :: Monad m => (forall a. m a -> n a) -> t m r -> t n r
 
-instance TransPipe (Pipe l i o u) where
+instance TransPipe (Pipe i o u) where
     transPipe f (HaveOutput p c o) = HaveOutput (transPipe f p) (f c) o
     transPipe f (NeedInput p c) = NeedInput (transPipe f . p) (transPipe f . c)
     transPipe _ (Done r) = Done r
@@ -505,71 +498,53 @@ instance TransPipe (ConduitM i o) where
 instance TransPipe (Sink i) where
     transPipe f (Sink p) = Sink (transPipe f p)
 
-class MapOutput m1 m2 o1 o2 | m1 -> m2, m2 -> m1, m1 -> o1, m2 -> o2 where
-    -- | Apply a function to all the output values of a @Pipe@.
-    --
-    -- This mimics the behavior of `fmap` for a `Source` and `Conduit` in pre-0.4
-    -- days.
-    --
-    -- Since 0.4.1
-    mapOutput :: (o1 -> o2)
-              -> m1 r
-              -> m2 r
+-- | Apply a function to all the output values of a @Pipe@.
+--
+-- This mimics the behavior of `fmap` for a `Source` and `Conduit` in pre-0.4
+-- days.
+--
+-- Since 0.4.1
+mapOutput :: Monad m
+          => (o1 -> o2)
+          -> Pipe i o1 u m r
+          -> Pipe i o2 u m r
+mapOutput f (HaveOutput p c o) = HaveOutput (mapOutput f p) c (f o)
+mapOutput f (NeedInput p c) = NeedInput (mapOutput f . p) (mapOutput f . c)
+mapOutput _ (Done r) = Done r
+mapOutput f (PipeM mp) = PipeM (liftM (mapOutput f) mp)
+mapOutput f (Leftover p i) = Leftover (mapOutput f p) i
 
-    -- | Same as 'mapOutput', but use a function that returns @Maybe@ values.
-    --
-    -- Since 0.5.0
-    mapOutputMaybe :: (o1 -> Maybe o2)
-                   -> m1 r
-                   -> m2 r
+-- | Same as 'mapOutput', but use a function that returns @Maybe@ values.
+--
+-- Since 0.5.0
+mapOutputMaybe :: Monad m
+               => (o1 -> Maybe o2)
+               -> Pipe i o1 u m r
+               -> Pipe i o2 u m r
+mapOutputMaybe f (HaveOutput p c o) = maybe id (\o' p' -> HaveOutput p' c o') (f o) (mapOutputMaybe f p)
+mapOutputMaybe f (NeedInput p c) = NeedInput (mapOutputMaybe f . p) (mapOutputMaybe f . c)
+mapOutputMaybe _ (Done r) = Done r
+mapOutputMaybe f (PipeM mp) = PipeM (liftM (mapOutputMaybe f) mp)
+mapOutputMaybe f (Leftover p i) = Leftover (mapOutputMaybe f p) i
 
-instance (Monad m, l1 ~ l2, i1 ~ i2, u1 ~ u2, m ~ m2) => MapOutput (Pipe l1 i1 o1 u1 m) (Pipe l2 i2 o2 u2 m2) o1 o2 where
-    mapOutput f (HaveOutput p c o) = HaveOutput (mapOutput f p) c (f o)
-    mapOutput f (NeedInput p c) = NeedInput (mapOutput f . p) (mapOutput f . c)
-    mapOutput _ (Done r) = Done r
-    mapOutput f (PipeM mp) = PipeM (liftM (mapOutput f) mp)
-    mapOutput f (Leftover p i) = Leftover (mapOutput f p) i
-
-    mapOutputMaybe f (HaveOutput p c o) = maybe id (\o' p' -> HaveOutput p' c o') (f o) (mapOutputMaybe f p)
-    mapOutputMaybe f (NeedInput p c) = NeedInput (mapOutputMaybe f . p) (mapOutputMaybe f . c)
-    mapOutputMaybe _ (Done r) = Done r
-    mapOutputMaybe f (PipeM mp) = PipeM (liftM (mapOutputMaybe f) mp)
-    mapOutputMaybe f (Leftover p i) = Leftover (mapOutputMaybe f p) i
-
-instance (Monad m, m ~ m2) => MapOutput (SourceM o1 m) (SourceM o2 m2) o1 o2 where
-    mapOutput f (SourceM m) = SourceM (mapOutput f m)
-    mapOutputMaybe f (SourceM m) = SourceM (mapOutputMaybe f m)
-
-instance (Monad m, m ~ m2, i1 ~ i2) => MapOutput (ConduitM i1 o1 m) (ConduitM i2 o2 m2) o1 o2 where
-    mapOutput f (ConduitM m) = ConduitM (mapOutput f m)
-    mapOutputMaybe f (ConduitM m) = ConduitM (mapOutputMaybe f m)
-
-class MapInput m1 m2 where
-    -- | Apply a function to all the input values of a @Pipe@.
-    --
-    -- Since 0.5.0
-    mapInput :: (AwaitInput m1 -> AwaitInput m2) -- ^ map initial input to new input
-             -> (AwaitInput m2 -> Maybe (AwaitInput m1)) -- ^ map new leftovers to initial leftovers
-             -> m2 r
-             -> m1 r
-
-instance (Monad m, o1 ~ o2, u1 ~ u2, m ~ m2) => MapInput (Pipe i1 i1 o1 u1 m) (Pipe i2 i2 o2 u2 m2) where
-    mapInput f f' (HaveOutput p c o) = HaveOutput (mapInput f f' p) c o
-    mapInput f f' (NeedInput p c)    = NeedInput (mapInput f f' . p . f) (mapInput f f' . c)
-    mapInput _ _  (Done r)           = Done r
-    mapInput f f' (PipeM mp)         = PipeM (liftM (mapInput f f') mp)
-    mapInput f f' (Leftover p i)     = maybe id (flip Leftover) (f' i) $ mapInput f f' p
-
-instance (Monad m, m ~ m2) => MapInput (Sink i1 m) (Sink i2 m2) where
-    mapInput f f' (Sink s1) = Sink $ mapInput f f' s1
-
-instance (Monad m, o1 ~ o2, m ~ m2) => MapInput (ConduitM i1 o1 m) (ConduitM i2 o2 m2) where
-    mapInput f f' (ConduitM p) = ConduitM $ mapInput f f' p
+-- | Apply a function to all the input values of a @Pipe@.
+--
+-- Since 0.5.0
+mapInput :: Monad m
+         => (i1 -> i2) -- ^ map initial input to new input
+         -> (i2 -> Maybe i1) -- ^ map new leftovers to initial leftovers
+         -> Pipe i2 o u m r
+         -> Pipe i1 o u m r
+mapInput f f' (HaveOutput p c o) = HaveOutput (mapInput f f' p) c o
+mapInput f f' (NeedInput p c)    = NeedInput (mapInput f f' . p . f) (mapInput f f' . c)
+mapInput _ _  (Done r)           = Done r
+mapInput f f' (PipeM mp)         = PipeM (liftM (mapInput f f') mp)
+mapInput f f' (Leftover p i)     = maybe id (flip Leftover) (f' i) $ mapInput f f' p
 
 -- | Convert a list into a source.
 --
 -- Since 0.3.0
-sourceList :: Monad m => [a] -> Pipe l i a u m ()
+sourceList :: Monad m => [a] -> Pipe i a u m ()
 sourceList =
     go
   where
@@ -580,46 +555,57 @@ sourceList =
 -- | The equivalent of @GHC.Exts.build@ for @Pipe@.
 --
 -- Since 0.4.2
-build :: Monad m => (forall b. (o -> b -> b) -> b -> b) -> Pipe l i o u m ()
+build :: Monad m => (forall b. (o -> b -> b) -> b -> b) -> Pipe i o u m ()
 build g = g (\o p -> HaveOutput p (return ()) o) (return ())
 
 {-# RULES
     "sourceList/build" forall (f :: (forall b. (a -> b -> b) -> b -> b)). sourceList (GHC.Exts.build f) = build f
   #-}
 
+fromPipe :: (Monad (t m), YieldOutput (t m) ~ o, YieldFinalizer (t m) ~ m (), Yield (t m), i ~ AwaitInput (t m), u ~ AwaitTerm (t m), Await (t m), Monad m, MonadTrans t)
+         => Pipe i o u m r
+         -> t m r
+fromPipe (Done r) = return r
+fromPipe (HaveOutput p c o) = yieldOr o c >> fromPipe p
+fromPipe (NeedInput p c) = awaitE >>= either (fromPipe . c) (fromPipe . p)
+fromPipe (PipeM mp) = lift mp >>= fromPipe
+fromPipe (Leftover p l) = leftover l >> fromPipe p
+{-# RULES
+    "fromPipe/Pipe" forall (p :: Pipe i o u m r). fromPipe p = p
+  ; "fromPipe/SourceM" forall (p :: Pipe () o () m r). fromPipe p = SourceM p
+  ; "fromPipe/ConduitM" forall (p :: Pipe i o () m r). fromPipe p = ConduitM p
+  ; "fromPipe/Sink" forall (p :: Pipe i Void () m r). fromPipe p = Sink p
+ #-}
+
 class ToPipe m where
-    type ToPipeLeftover m
     type ToPipeInput m
     type ToPipeOutput m
     type ToPipeTerm m
     type ToPipeMonad m :: * -> *
-    toPipe :: m r -> Pipe (ToPipeLeftover m) (ToPipeInput m) (ToPipeOutput m) (ToPipeTerm m) (ToPipeMonad m) r
+    toPipe :: m r -> Pipe (ToPipeInput m) (ToPipeOutput m) (ToPipeTerm m) (ToPipeMonad m) r
 
-instance Monad m => ToPipe (Pipe l i o u m) where
-    type ToPipeLeftover (Pipe l i o u m) = l
-    type ToPipeInput (Pipe l i o u m) = i
-    type ToPipeOutput (Pipe l i o u m) = o
-    type ToPipeTerm (Pipe l i o u m) = u
-    type ToPipeMonad (Pipe l i o u m) = m
+instance Monad m => ToPipe (Pipe i o u m) where
+    type ToPipeInput (Pipe i o u m) = i
+    type ToPipeOutput (Pipe i o u m) = o
+    type ToPipeTerm (Pipe i o u m) = u
+    type ToPipeMonad (Pipe i o u m) = m
     toPipe = id
 
 instance Monad m => ToPipe (Sink i m) where
-    type ToPipeLeftover (Sink i m) = Void
     type ToPipeInput (Sink i m) = i
     type ToPipeOutput (Sink i m) = Void
     type ToPipeTerm (Sink i m) = ()
     type ToPipeMonad (Sink i m) = m
     toPipe =
-        go . injectLeftovers . unSink
+        go . unSink
       where
         go (Done r) = Done r
         go (PipeM mp) = PipeM (liftM go mp)
         go (NeedInput p c) = NeedInput (go . p) (const $ go $ c ())
         go (HaveOutput _ _ o) = absurd o
-        go (Leftover _ l) = absurd l
+        go (Leftover p l) = Leftover (go p) l
 
 instance Monad m => ToPipe (SourceM o m) where
-    type ToPipeLeftover (SourceM o m) = Void
     type ToPipeInput (SourceM o m) = ()
     type ToPipeOutput (SourceM o m) = o
     type ToPipeTerm (SourceM o m) = ()
@@ -631,23 +617,22 @@ instance Monad m => ToPipe (SourceM o m) where
         go (PipeM mp) = PipeM (liftM go mp)
         go (NeedInput _ c) = go $ c ()
         go (HaveOutput p c o) = HaveOutput (go p) c o
-        go (Leftover p ()) = go p
+        go (Leftover p ()) = Leftover (go p) ()
 
 instance Monad m => ToPipe (ConduitM i o m) where
-    type ToPipeLeftover (ConduitM i o m) = Void
     type ToPipeInput (ConduitM i o m) = i
     type ToPipeOutput (ConduitM i o m) = o
     type ToPipeTerm (ConduitM i o m) = ()
     type ToPipeMonad (ConduitM i o m) = m
 
     toPipe =
-        go . injectLeftovers . unConduitM
+        go . unConduitM
       where
         go (Done r) = Done r
         go (PipeM mp) = PipeM (liftM go mp)
         go (NeedInput p c) = NeedInput (go . p) (const $ go $ c ())
         go (HaveOutput p c o) = HaveOutput (go p) c o
-        go (Leftover _ l) = absurd l
+        go (Leftover p l) = Leftover (go p) l
 
 -- | Returns a tuple of the upstream and downstream results. Note that this
 -- will force consumption of the entire input stream.
