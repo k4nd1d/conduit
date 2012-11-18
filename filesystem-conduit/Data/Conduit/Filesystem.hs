@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- |
 -- Copyright: 2011 John Millikin
@@ -39,10 +40,10 @@ import qualified System.Posix as Posix
 -- Note: the option of whether to follow symlinks is currently only checked
 -- on POSIX platforms, as the @Win32@ package does not support querying
 -- symlink status. On Windows, symlinks will always be followed.
-traverse :: MonadIO m
+traverse :: (MonadIO m, PipeOutput m ~ FilePath, IsPipe m)
          => Bool -- ^ Follow directory symlinks (only used on POSIX platforms)
          -> FilePath -- ^ Root directory
-         -> GSource m FilePath
+         -> m ()
 traverse _followSymlinks root =
     liftIO (listDirectory root) >>= pull
   where
@@ -73,13 +74,13 @@ traverse _followSymlinks root =
 #endif
 
 -- | Same as 'CB.sourceFile', but uses system-filepath\'s @FilePath@ type.
-sourceFile :: MonadResource m
+sourceFile :: (ResourcePipe m, PipeOutput m ~ S.ByteString, IsPipe m)
            => FilePath
-           -> GSource m S.ByteString
+           -> m ()
 sourceFile = CB.sourceFile . encodeString
 
 -- | Same as 'CB.sinkFile', but uses system-filepath\'s @FilePath@ type.
-sinkFile :: MonadResource m
+sinkFile :: (ResourcePipe m, IsPipe m, PipeInput m ~ S.ByteString)
          => FilePath
-         -> GInfSink S.ByteString m
+         -> m (PipeTerm m)
 sinkFile = CB.sinkFile . encodeString

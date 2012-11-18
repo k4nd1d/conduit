@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- |
 -- Copyright: 2011 Michael Snoyman, 2010 John Millikin
@@ -28,8 +29,7 @@ import           Data.Typeable (Typeable)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.Text as T
-import           Control.Monad.Trans.Class (lift)
-import           Control.Monad (unless)
+import           Control.Monad (unless, liftM)
 
 import qualified Data.Attoparsec.ByteString
 import qualified Data.Attoparsec.Text
@@ -113,14 +113,16 @@ instance AttoparsecInput T.Text where
 -- If parsing fails, a 'ParseError' will be thrown with 'monadThrow'.
 --
 -- Since 0.5.0
-sinkParser :: (AttoparsecInput a, MonadThrow m) => A.Parser a b -> GLSink a m b
-sinkParser = fmap snd . sinkParserPos (Position 1 1)
+sinkParser :: (AttoparsecInput a, MonadThrow m, a ~ PipeInput m, IsPipe m) => A.Parser a b -> m b
+sinkParser = liftM snd . sinkParserPos (Position 1 1)
 
 -- | Consume a stream of parsed tokens, returning both the token and the
 -- position it appears at.
 --
 -- Since 0.5.0
-conduitParser :: (AttoparsecInput a, MonadThrow m) => A.Parser a b -> GLInfConduit a m (PositionRange, b)
+conduitParser :: (AttoparsecInput a, MonadThrow m, IsPipe m, PipeOutput m ~ (PositionRange, b), a ~ PipeInput m)
+              => A.Parser a b
+              -> m (PipeTerm m)
 conduitParser parser =
     conduit $ Position 1 0
   where
@@ -133,7 +135,10 @@ conduitParser parser =
             yield (PositionRange pos pos', res)
             conduit pos'
 
-sinkParserPos :: (AttoparsecInput a, MonadThrow m) => Position -> A.Parser a b -> GLSink a m (Position, b)
+sinkParserPos :: (AttoparsecInput a, MonadThrow m, a ~ PipeInput m, IsPipe m)
+              => Position
+              -> A.Parser a b
+              -> m (Position, b)
 sinkParserPos pos0 =
     sink empty pos0 . parseA
   where
@@ -161,9 +166,9 @@ sinkParserPos pos0 =
                     | end       = pos
                     | otherwise = addLinesCols prev pos
                 pos'' = addLinesCols x pos'
-             in pos'' `seq` lift (monadThrow $ ParseError contexts msg pos'')
+             in pos'' `seq` monadThrow (ParseError contexts msg pos'')
         go end c (A.Partial parser')
-            | end       = lift $ monadThrow DivergentParser
+            | end       = monadThrow DivergentParser
             | otherwise =
                 pos' `seq` sink c pos' parser'
               where

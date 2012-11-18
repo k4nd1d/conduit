@@ -1,6 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeFamilies #-}
 -- | Convert a stream of blaze-builder @Builder@s into a stream of @ByteString@s.
 --
 -- Adapted from blaze-builder-enumerator, written by myself and Simon Meier.
@@ -44,7 +45,6 @@ module Data.Conduit.Blaze
 
 import Data.Conduit hiding (Source, Conduit, Sink, Pipe)
 import Control.Monad (unless, liftM)
-import Control.Monad.Trans.Class (lift, MonadTrans)
 
 import qualified Data.ByteString                   as S
 
@@ -54,14 +54,16 @@ import Blaze.ByteString.Builder.Internal.Buffer
 
 -- | Incrementally execute builders and pass on the filled chunks as
 -- bytestrings.
-builderToByteString :: MonadUnsafeIO m => GInfConduit Builder m S.ByteString
+builderToByteString :: (MonadUnsafeIO m, PipeInput m ~ Builder, PipeOutput m ~ S.ByteString, IsPipe m)
+                    => m (PipeTerm m)
 builderToByteString =
   builderToByteStringWith (allNewBuffersStrategy defaultBufferSize)
 
 -- |
 --
 -- Since 0.0.2
-builderToByteStringFlush :: MonadUnsafeIO m => GInfConduit (Flush Builder) m (Flush S.ByteString)
+builderToByteStringFlush :: (MonadUnsafeIO m, IsPipe m, PipeInput m ~ Flush Builder, PipeOutput m ~ Flush S.ByteString)
+                         => m (PipeTerm m)
 builderToByteStringFlush =
   builderToByteStringWithFlush (allNewBuffersStrategy defaultBufferSize)
 
@@ -72,9 +74,9 @@ builderToByteStringFlush =
 -- WARNING: This conduit yields bytestrings that are NOT
 -- referentially transparent. Their content will be overwritten as soon
 -- as control is returned from the inner sink!
-unsafeBuilderToByteString :: MonadUnsafeIO m
+unsafeBuilderToByteString :: (PipeOutput m ~ S.ByteString, PipeInput m ~ Builder, MonadUnsafeIO m, IsPipe m)
                           => IO Buffer  -- action yielding the inital buffer.
-                          -> GInfConduit Builder m S.ByteString
+                          -> m (PipeTerm m)
 unsafeBuilderToByteString = builderToByteStringWith . reuseBufferStrategy
 
 
@@ -82,9 +84,9 @@ unsafeBuilderToByteString = builderToByteStringWith . reuseBufferStrategy
 -- filled chunks as bytestrings to an inner sink.
 --
 -- INV: All bytestrings passed to the inner sink are non-empty.
-builderToByteStringWith :: MonadUnsafeIO m
+builderToByteStringWith :: (MonadUnsafeIO m, PipeOutput m ~ S.ByteString, PipeInput m ~ Builder, IsPipe m)
                         => BufferAllocStrategy
-                        -> GInfConduit Builder m S.ByteString
+                        -> m (PipeTerm m)
 builderToByteStringWith =
     helper (liftM (fmap Chunk) awaitE) yield'
   where
@@ -95,16 +97,16 @@ builderToByteStringWith =
 --
 -- Since 0.0.2
 builderToByteStringWithFlush
-    :: MonadUnsafeIO m
+    :: (IsPipe m, PipeInput m ~ Flush Builder, PipeOutput m ~ Flush S.ByteString, MonadUnsafeIO m)
     => BufferAllocStrategy
-    -> GInfConduit (Flush Builder) m (Flush S.ByteString)
+    -> m (PipeTerm m)
 builderToByteStringWithFlush = helper awaitE yield
 
-helper :: (MonadUnsafeIO m, Monad (t m), MonadTrans t)
-       => t m (Either term (Flush Builder))
-       -> (Flush S.ByteString -> t m ())
+helper :: (MonadUnsafeIO m)
+       => m (Either term (Flush Builder))
+       -> (Flush S.ByteString -> m ())
        -> BufferAllocStrategy
-       -> t m term
+       -> m term
 helper awaitE' yield' (ioBufInit, nextBuf) =
     loop ioBufInit
   where
@@ -115,7 +117,7 @@ helper awaitE' yield' (ioBufInit, nextBuf) =
     cont' ioBuf (Chunk builder) = push ioBuf builder loop
 
     close ioBuf r = do
-        buf <- lift $ unsafeLiftIO $ ioBuf
+        buf <- unsafeLiftIO $ ioBuf
         maybe (return ()) (yield' . Chunk) (unsafeFreezeNonEmptyBuffer buf)
         return r
 
@@ -125,8 +127,8 @@ helper awaitE' yield' (ioBufInit, nextBuf) =
         finalStep !(BufRange pf _) = return $ Done pf ()
 
         go bStep ioBuf = do
-            !buf   <- lift $ unsafeLiftIO $ ioBuf
-            signal <- lift $ unsafeLiftIO $ execBuildStep bStep buf
+            !buf   <- unsafeLiftIO $ ioBuf
+            signal <- unsafeLiftIO $ execBuildStep bStep buf
             case signal of
                 Done op' _ -> continue $ return $ updateEndOfSlice buf op'
                 BufferFull minSize op' bStep' -> do
@@ -136,7 +138,7 @@ helper awaitE' yield' (ioBufInit, nextBuf) =
                             -- sequencing the computation of the next buffer
                             -- construction here ensures that the reference to the
                             -- foreign pointer `fp` is lost as soon as possible.
-                            ioBuf' <- lift $ unsafeLiftIO $ nextBuf minSize buf'
+                            ioBuf' <- unsafeLiftIO $ nextBuf minSize buf'
                             go bStep' ioBuf'
                     case unsafeFreezeNonEmptyBuffer buf' of
                         Nothing -> return ()
@@ -148,4 +150,4 @@ helper awaitE' yield' (ioBufInit, nextBuf) =
                         Nothing -> return ()
                         Just bs' -> yield' $ Chunk bs'
                     unless (S.null bs) $ yield' $ Chunk bs
-                    lift (unsafeLiftIO $ nextBuf 1 buf') >>= go bStep'
+                    unsafeLiftIO (nextBuf 1 buf') >>= go bStep'
