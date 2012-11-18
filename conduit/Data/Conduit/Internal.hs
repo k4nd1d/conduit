@@ -1,5 +1,7 @@
 {-# OPTIONS_HADDOCK not-home #-}
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RankNTypes #-}
@@ -17,9 +19,8 @@ module Data.Conduit.Internal
     , ConduitM (..)
     , ResumableSource (..)
       -- * Primitives
-    , Await (..)
+    , IsPipe (..)
     , awaitForever
-    , Yield (..)
       -- * Finalization
     , ResourcePipe (..)
       -- * Composition
@@ -49,8 +50,24 @@ import Control.Monad.Base (MonadBase (liftBase))
 import Data.Void (Void, absurd)
 import Data.Monoid (Monoid (mappend, mempty))
 import Control.Monad.Trans.Resource
+import Control.Monad.Trans.Control (liftWith, restoreT)
 import qualified GHC.Exts
 import qualified Data.IORef as I
+
+import Control.Monad.Trans.Identity ( IdentityT)
+import Control.Monad.Trans.List     ( ListT    )
+import Control.Monad.Trans.Maybe    ( MaybeT   )
+import Control.Monad.Trans.Error    ( ErrorT, Error)
+import Control.Monad.Trans.Reader   ( ReaderT  )
+import Control.Monad.Trans.State    ( StateT   )
+import Control.Monad.Trans.Writer   ( WriterT  )
+import Control.Monad.Trans.RWS      ( RWST     )
+
+import qualified Control.Monad.Trans.RWS.Strict    as Strict ( RWST   )
+import qualified Control.Monad.Trans.State.Strict  as Strict ( StateT )
+import qualified Control.Monad.Trans.Writer.Strict as Strict ( WriterT )
+
+import Control.Monad.State.Class  ( MonadState (..) )
 
 -- | The underlying datatype for all the types in this package.  In has six
 -- type parameters:
@@ -166,21 +183,23 @@ newtype ConduitM i o m r = ConduitM { unConduitM :: Pipe i o () m r }
 -- Since 0.5.0
 data ResumableSource m o = ResumableSource (Pipe () o () m ()) (m ())
 
-class Monad m => Await m where
-    type AwaitInput m
-    type AwaitTerm m
+class (Monad m, Monad (PipeMonad m)) => IsPipe m where
+    type PipeInput m
+    type PipeTerm m
+    type PipeOutput m
+    type PipeMonad m :: * -> *
 
     -- | Wait for a single input value from upstream, terminating immediately if no
     -- data is available.
     --
     -- Since 0.5.0
-    await :: m (Maybe (AwaitInput m))
+    await :: m (Maybe (PipeInput m))
 
     -- | This is similar to @await@, but will return the upstream result value as
     -- @Left@ if available.
     --
     -- Since 0.5.0
-    awaitE :: m (Either (AwaitTerm m) (AwaitInput m))
+    awaitE :: m (Either (PipeTerm m) (PipeInput m))
 
     -- | Provide a single piece of leftover input to be consumed by the next pipe
     -- in the current monadic binding.
@@ -189,11 +208,34 @@ class Monad m => Await m where
     -- already consumed from upstream.
     --
     -- Since 0.5.0
-    leftover :: AwaitInput m -> m ()
+    leftover :: PipeInput m -> m ()
 
-instance Monad m => Await (Pipe i o u m) where
-    type AwaitInput (Pipe i o u m) = i
-    type AwaitTerm (Pipe i o u m) = u
+    -- | Send a single output value downstream. If the downstream @Pipe@
+    -- terminates, this @Pipe@ will terminate as well.
+    --
+    -- Since 0.5.0
+    yield :: PipeOutput m -> m ()
+
+    -- | Similar to @yield@, but additionally takes a finalizer to be run if the
+    -- downstream @Pipe@ terminates.
+    --
+    -- Since 0.5.0
+    yieldOr :: PipeOutput m -> PipeMonad m () -> m ()
+
+    liftPipeMonad :: PipeMonad m a -> m a
+
+    -- | Add some code to be run when the given @Pipe@ cleans up.
+    --
+    -- Since 0.4.1
+    addCleanup :: (Bool -> PipeMonad m ()) -- ^ @True@ if @Pipe@ ran to completion, @False@ for early termination.
+               -> m r
+               -> m r
+
+instance Monad m => IsPipe (Pipe i o u m) where
+    type PipeInput (Pipe i o u m) = i
+    type PipeTerm (Pipe i o u m) = u
+    type PipeOutput (Pipe i o u m) = o
+    type PipeMonad (Pipe i o u m) = m
 
     await = NeedInput (Done . Just) (\_ -> Done Nothing)
     {-# INLINE [1] await #-}
@@ -204,161 +246,13 @@ instance Monad m => Await (Pipe i o u m) where
     leftover = Leftover (Done ())
     {-# INLINE [1] leftover #-}
 
-instance Monad m => Await (SourceM o m) where
-    type AwaitInput (SourceM o m) = ()
-    type AwaitTerm (SourceM o m) = ()
-
-    await = SourceM await
-    {-# INLINE await #-}
-
-    awaitE = SourceM awaitE
-    {-# INLINE awaitE #-}
-
-    leftover = SourceM . leftover
-    {-# INLINE leftover #-}
-
-instance Monad m => Await (ConduitM i o m) where
-    type AwaitInput (ConduitM i o m) = i
-    type AwaitTerm (ConduitM i o m) = ()
-
-    await = ConduitM await
-    {-# INLINE await #-}
-
-    awaitE = ConduitM awaitE
-    {-# INLINE awaitE #-}
-
-    leftover = ConduitM . leftover
-    {-# INLINE leftover #-}
-
-instance Monad m => Await (Sink i m) where
-    type AwaitInput (Sink i m) = i
-    type AwaitTerm (Sink i m) = ()
-
-    await = Sink await
-    {-# INLINE await #-}
-
-    awaitE = Sink awaitE
-    {-# INLINE awaitE #-}
-
-    leftover = Sink . leftover
-    {-# INLINE leftover #-}
-
-{-# RULES "await >>= maybe" forall x y. await >>= maybe x y = NeedInput y (const x) #-}
-{-# RULES "awaitE >>= either" forall x y. awaitE >>= either x y = NeedInput y x #-}
-
--- | Wait for input forever, calling the given inner @Pipe@ for each piece of
--- new input. Returns the upstream result type.
---
--- Since 0.5.0
-awaitForever :: (Await m, r ~ AwaitTerm m)
-             => (AwaitInput m -> m r')
-             -> m r
-awaitForever inner =
-    self
-  where
-    self = awaitE >>= either return (\i -> inner i >> self)
-{-# INLINE [1] awaitForever #-}
-
-class Monad m => Yield m where
-    type YieldOutput m
-    type YieldFinalizer m
-
-    -- | Send a single output value downstream. If the downstream @Pipe@
-    -- terminates, this @Pipe@ will terminate as well.
-    --
-    -- Since 0.5.0
-    yield :: YieldOutput m -> m ()
-
-    -- | Similar to @yield@, but additionally takes a finalizer to be run if the
-    -- downstream @Pipe@ terminates.
-    --
-    -- Since 0.5.0
-    yieldOr :: YieldOutput m -> YieldFinalizer m -> m ()
-
-instance Monad m => Yield (Pipe i o u m) where
-    type YieldOutput (Pipe i o u m) = o
-    type YieldFinalizer (Pipe i o u m) = m ()
-
     yield = yield'
     {-# INLINE yield #-}
 
     yieldOr = yieldOr'
     {-# INLINE yieldOr #-}
 
-instance Monad m => Yield (SourceM o m) where
-    type YieldOutput (SourceM o m) = o
-    type YieldFinalizer (SourceM o m) = m ()
-
-    yield = SourceM . yield
-    {-# INLINE yield #-}
-
-    yieldOr a = SourceM . yieldOr a
-    {-# INLINE yieldOr #-}
-
-instance Monad m => Yield (ConduitM i o m) where
-    type YieldOutput (ConduitM i o m) = o
-    type YieldFinalizer (ConduitM i o m) = m ()
-
-    yield = ConduitM . yield
-    {-# INLINE yield #-}
-
-    yieldOr a = ConduitM . yieldOr a
-    {-# INLINE yieldOr #-}
-
-instance Monad m => Yield (Sink i m) where
-    type YieldOutput (Sink i m) = Void
-    type YieldFinalizer (Sink i m) = m ()
-
-    yield = Sink . yield
-    {-# INLINE yield #-}
-
-    yieldOr a = Sink . yieldOr a
-    {-# INLINE yieldOr #-}
-
-
-yield' :: Monad m => o -> Pipe i o u m ()
-yield' = HaveOutput (Done ()) (return ())
-{-# INLINE [1] yield' #-}
-
-yieldOr' :: Monad m => o -> m () -> Pipe i o u m ()
-yieldOr' o f = HaveOutput (Done ()) f o
-{-# INLINE [1] yieldOr' #-}
-
-{-# RULES
-    "yield o >> p" forall o (p :: Pipe i o u m r). yield' o >> p = HaveOutput p (return ()) o
-  ; "mapM_ yield" mapM_ yield' = sourceList
-  ; "yieldOr o c >> p" forall o c (p :: Pipe i o u m r). yieldOr' o c >> p = HaveOutput p c o
-  #-}
-
-{-# RULES "leftover l >> p" forall l (p :: Pipe l o u m r). leftover l >> p = Leftover p l #-}
-
-class ResourcePipe t where
-    -- | Perform some allocation and run an inner @Pipe@. Two guarantees are given
-    -- about resource finalization:
-    --
-    -- 1. It will be /prompt/. The finalization will be run as early as possible.
-    --
-    -- 2. It is exception safe. Due to usage of @resourcet@, the finalization will
-    --    be run in the event of any exceptions.
-    --
-    -- Since 0.5.0
-    bracketP :: MonadResource m => IO a -> (a -> IO ()) -> (a -> t m r) -> t m r
-
-    -- | Add some code to be run when the given @Pipe@ cleans up.
-    --
-    -- Since 0.4.1
-    addCleanup :: Monad m
-               => (Bool -> m ()) -- ^ @True@ if @Pipe@ ran to completion, @False@ for early termination.
-               -> t m r
-               -> t m r
-
-instance ResourcePipe (Pipe i o u) where
-    bracketP alloc free inside =
-        PipeM start
-      where
-        start = do
-            (key, seed) <- allocate alloc free
-            return $ addCleanup (const $ release key) (inside seed)
+    liftPipeMonad = lift
 
     addCleanup cleanup (Done r) = PipeM (cleanup True >> return (Done r))
     addCleanup cleanup (HaveOutput src close x) = HaveOutput
@@ -370,6 +264,153 @@ instance ResourcePipe (Pipe i o u) where
         (addCleanup cleanup . p)
         (addCleanup cleanup . c)
     addCleanup cleanup (Leftover p i) = Leftover (addCleanup cleanup p) i
+
+instance Monad m => IsPipe (SourceM o m) where
+    type PipeInput (SourceM o m) = ()
+    type PipeTerm (SourceM o m) = ()
+    type PipeOutput (SourceM o m) = o
+    type PipeMonad (SourceM o m) = m
+
+    await = SourceM await
+    {-# INLINE await #-}
+
+    awaitE = SourceM awaitE
+    {-# INLINE awaitE #-}
+
+    leftover = SourceM . leftover
+    {-# INLINE leftover #-}
+
+    yield = SourceM . yield
+    {-# INLINE yield #-}
+
+    yieldOr a = SourceM . yieldOr a
+    {-# INLINE yieldOr #-}
+
+    liftPipeMonad = lift
+
+    addCleanup c (SourceM p) = SourceM (addCleanup c p)
+
+instance Monad m => IsPipe (ConduitM i o m) where
+    type PipeInput (ConduitM i o m) = i
+    type PipeTerm (ConduitM i o m) = ()
+    type PipeOutput (ConduitM i o m) = o
+    type PipeMonad (ConduitM i o m) = m
+
+    await = ConduitM await
+    {-# INLINE await #-}
+
+    awaitE = ConduitM awaitE
+    {-# INLINE awaitE #-}
+
+    leftover = ConduitM . leftover
+    {-# INLINE leftover #-}
+
+    yield = ConduitM . yield
+    {-# INLINE yield #-}
+
+    yieldOr a = ConduitM . yieldOr a
+    {-# INLINE yieldOr #-}
+
+    liftPipeMonad = lift
+
+    addCleanup c (ConduitM p) = ConduitM (addCleanup c p)
+
+instance Monad m => IsPipe (Sink i m) where
+    type PipeInput (Sink i m) = i
+    type PipeTerm (Sink i m) = ()
+    type PipeOutput (Sink i m) = Void
+    type PipeMonad (Sink i m) = m
+
+    await = Sink await
+    {-# INLINE await #-}
+
+    awaitE = Sink awaitE
+    {-# INLINE awaitE #-}
+
+    leftover = Sink . leftover
+    {-# INLINE leftover #-}
+
+    yield = Sink . yield
+    {-# INLINE yield #-}
+
+    yieldOr a = Sink . yieldOr a
+    {-# INLINE yieldOr #-}
+
+    liftPipeMonad = lift
+
+    addCleanup c (Sink p) = Sink (addCleanup c p)
+
+#define GOALL(C, T) instance C => IsPipe (T) where; type PipeInput (T) = PipeInput m; type PipeMonad (T) = PipeMonad m; type PipeTerm (T) = PipeTerm m; type PipeOutput (T) = PipeOutput m; await = lift await; awaitE = lift awaitE; leftover = lift . leftover; yield = lift . yield; yieldOr a = lift . yieldOr a; liftPipeMonad = lift . liftPipeMonad; addCleanup c r = liftWith (\run -> run $ addCleanup c r) >>= restoreT . return
+#define GO(T) GOALL(IsPipe m, T m)
+#define GOX(X, T) GOALL((IsPipe m, X), T m)
+GO(IdentityT)
+GO(ListT)
+GO(MaybeT)
+GOX(Error e, ErrorT e)
+GO(ReaderT r)
+GO(StateT s)
+GOX(Monoid w, WriterT w)
+GOX(Monoid w, RWST r w s)
+GOX(Monoid w, Strict.RWST r w s)
+GO(Strict.StateT s)
+GOX(Monoid w, Strict.WriterT w)
+GO(ResourceT)
+#undef GO
+#undef GOX
+#undef GOALL
+
+{-# RULES "await >>= maybe" forall x y. await >>= maybe x y = NeedInput y (const x) #-}
+{-# RULES "awaitE >>= either" forall x y. awaitE >>= either x y = NeedInput y x #-}
+
+-- | Wait for input forever, calling the given inner @Pipe@ for each piece of
+-- new input. Returns the upstream result type.
+--
+-- Since 0.5.0
+awaitForever :: (r ~ PipeTerm m, IsPipe m)
+             => (PipeInput m -> m r')
+             -> m r
+awaitForever inner =
+    self
+  where
+    self = awaitE >>= either return (\i -> inner i >> self)
+{-# INLINE [1] awaitForever #-}
+
+
+yield' :: Monad m => o -> Pipe i o u m ()
+yield' = HaveOutput (Done ()) (return ())
+{-# INLINE [1] yield' #-}
+
+yieldOr' :: o -> m () -> Pipe i o u m ()
+yieldOr' o f = HaveOutput (Done ()) f o
+{-# INLINE [1] yieldOr' #-}
+
+{-# RULES
+    "yield o >> p" forall o (p :: Pipe i o u m r). yield' o >> p = HaveOutput p (return ()) o
+  ; "mapM_ yield" mapM_ yield' = sourceList
+  ; "yieldOr o c >> p" forall o c (p :: Pipe i o u m r). yieldOr' o c >> p = HaveOutput p c o
+  #-}
+
+{-# RULES "leftover l >> p" forall l (p :: Pipe l o u m r). leftover l >> p = Leftover p l #-}
+
+class (IsPipe m, MonadResource (PipeMonad m), MonadIO m) => ResourcePipe m where
+    -- | Perform some allocation and run an inner @Pipe@. Two guarantees are given
+    -- about resource finalization:
+    --
+    -- 1. It will be /prompt/. The finalization will be run as early as possible.
+    --
+    -- 2. It is exception safe. Due to usage of @resourcet@, the finalization will
+    --    be run in the event of any exceptions.
+    --
+    -- Since 0.5.0
+    bracketP :: IO a -> (a -> IO ()) -> (a -> m r) -> m r
+
+instance MonadResource m => ResourcePipe (Pipe i o u m) where
+    bracketP alloc free inside =
+        PipeM start
+      where
+        start = do
+            (key, seed) <- allocate alloc free
+            return $ addCleanup (const $ release key) (inside seed)
 
 -- | The identity @Pipe@.
 --
@@ -562,13 +603,13 @@ build g = g (\o p -> HaveOutput p (return ()) o) (return ())
     "sourceList/build" forall (f :: (forall b. (a -> b -> b) -> b -> b)). sourceList (GHC.Exts.build f) = build f
   #-}
 
-fromPipe :: (Monad (t m), YieldOutput (t m) ~ o, YieldFinalizer (t m) ~ m (), Yield (t m), i ~ AwaitInput (t m), u ~ AwaitTerm (t m), Await (t m), Monad m, MonadTrans t)
-         => Pipe i o u m r
-         -> t m r
+fromPipe :: (Monad m, PipeOutput m ~ o, IsPipe m, i ~ PipeInput m, u ~ PipeTerm m)
+         => Pipe i o u (PipeMonad m) r
+         -> m r
 fromPipe (Done r) = return r
 fromPipe (HaveOutput p c o) = yieldOr o c >> fromPipe p
 fromPipe (NeedInput p c) = awaitE >>= either (fromPipe . c) (fromPipe . p)
-fromPipe (PipeM mp) = lift mp >>= fromPipe
+fromPipe (PipeM mp) = liftPipeMonad mp >>= fromPipe
 fromPipe (Leftover p l) = leftover l >> fromPipe p
 {-# RULES
     "fromPipe/Pipe" forall (p :: Pipe i o u m r). fromPipe p = p
@@ -638,7 +679,7 @@ instance Monad m => ToPipe (ConduitM i o m) where
 -- will force consumption of the entire input stream.
 --
 -- Since 0.5.0
-withUpstream :: (u ~ AwaitTerm m, Await m)
+withUpstream :: (u ~ PipeTerm m, IsPipe m)
              => m r
              -> m (u, r)
 withUpstream down =
@@ -671,3 +712,7 @@ unwrapResumable (ResumableSource src final) = do
             x <- liftIO $ I.readIORef ref
             when x final
     return (SourceM $ liftIO (I.writeIORef ref False) >> src, final')
+
+instance MonadState s m => MonadState s (Pipe i o u m) where
+  get = lift get
+  put = lift . put

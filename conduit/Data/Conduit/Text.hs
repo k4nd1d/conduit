@@ -65,8 +65,8 @@ instance Show Codec where
 -- | Emit each line separately
 --
 -- Since 0.4.1
-lines :: (YieldOutput m ~ T.Text, AwaitInput m ~ T.Text, Yield m, Await m)
-      => m (AwaitTerm m)
+lines :: (PipeOutput m ~ T.Text, PipeInput m ~ T.Text, IsPipe m)
+      => m (PipeTerm m)
 lines =
     loop id
   where
@@ -89,9 +89,9 @@ lines =
 -- not capable of representing an input character, an exception will be thrown.
 --
 -- Since 0.3.0
-encode :: (MonadThrow m, AwaitInput m ~ T.Text, Await m, YieldOutput m ~ B8.ByteString, Yield m)
+encode :: (MonadThrow m, PipeInput m ~ T.Text, IsPipe m, PipeOutput m ~ B8.ByteString)
        => Codec
-       -> m (AwaitTerm m)
+       -> m (PipeTerm m)
 encode codec = awaitForever $ \t -> do
     let (bs, mexc) = codecEncode codec t
     maybe (yield bs) (monadThrow . fst) mexc
@@ -101,9 +101,9 @@ encode codec = awaitForever $ \t -> do
 -- not capable of decoding an input byte sequence, an exception will be thrown.
 --
 -- Since 0.3.0
-decode :: (MonadThrow m, YieldOutput m ~ T.Text, Yield m, AwaitInput m ~ B8.ByteString, Await m)
+decode :: (MonadThrow m, PipeOutput m ~ T.Text, PipeInput m ~ B8.ByteString, IsPipe m)
        => Codec
-       -> m (AwaitTerm m)
+       -> m (PipeTerm m)
 decode codec =
     loop id
   where

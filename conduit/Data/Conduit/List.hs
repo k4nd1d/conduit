@@ -63,18 +63,16 @@ import Prelude
     )
 import Data.Monoid (Monoid, mempty, mappend)
 import Data.Conduit hiding (Source, Sink, Conduit, Pipe)
-import Data.Conduit.Internal (pipe)
 import Control.Monad (when, (<=<))
-import Control.Monad.Trans.Class (MonadTrans, lift)
 
-sourceList :: Yield m => [YieldOutput m] -> m ()
+sourceList :: IsPipe m => [PipeOutput m] -> m ()
 sourceList = Prelude.mapM_ yield
 
 -- | Generate a source from a seed value.
 --
 -- Since 0.4.2
-unfold :: Yield m
-       => (b -> Maybe (YieldOutput m, b))
+unfold :: IsPipe m
+       => (b -> Maybe (PipeOutput m, b))
        -> b
        -> m ()
 unfold f =
@@ -92,7 +90,7 @@ unfold f =
 -- structures.
 --
 -- Since 0.4.2
-enumFromTo :: (Enum a, Eq a, Yield m, a ~ YieldOutput m)
+enumFromTo :: (Enum a, Eq a, IsPipe m, a ~ PipeOutput m)
            => a
            -> a
            -> m ()
@@ -104,7 +102,7 @@ enumFromTo start stop =
         | otherwise = yield i >> go (succ i)
 
 -- | Produces an infinite stream of repeated applications of f to x.
-iterate :: (Yield m, YieldOutput m ~ a)
+iterate :: (IsPipe m, PipeOutput m ~ a)
         => (a -> a)
         -> a
         -> m ()
@@ -116,8 +114,8 @@ iterate f =
 -- | A strict left fold.
 --
 -- Since 0.3.0
-fold :: Await m
-     => (b -> AwaitInput m -> b)
+fold :: IsPipe m
+     => (b -> PipeInput m -> b)
      -> b
      -> m b
 fold f =
@@ -133,10 +131,10 @@ fold f =
 -- | A monadic strict left fold.
 --
 -- Since 0.3.0
-foldM :: (Await (t m), Monad m, MonadTrans t)
-      => (b -> AwaitInput (t m) -> m b)
+foldM :: IsPipe m
+      => (b -> PipeInput m -> PipeMonad m b)
       -> b
-      -> t m b
+      -> m b
 foldM f =
     loop
   where
@@ -144,14 +142,14 @@ foldM f =
         await >>= maybe (return accum) go
       where
         go a = do
-            accum' <- lift $ f accum a
+            accum' <- liftPipeMonad $ f accum a
             accum' `seq` loop accum'
 
 -- | A monoidal strict left fold.
 --
 -- Since 0.5.3
-foldMap :: (Monad m, Monoid b, Await m)
-        => (AwaitInput m -> b)
+foldMap :: (Monad m, Monoid b, IsPipe m)
+        => (PipeInput m -> b)
         -> m b
 foldMap f =
     fold combiner mempty
@@ -161,10 +159,10 @@ foldMap f =
 -- | Apply the action to all values in the stream.
 --
 -- Since 0.3.0
-mapM_ :: (Await (t m), Monad m, MonadTrans t)
-      => (AwaitInput (t m) -> m ())
-      -> t m (AwaitTerm (t m))
-mapM_ f = awaitForever $ lift . f
+mapM_ :: IsPipe m
+      => (PipeInput m -> PipeMonad m ())
+      -> m (PipeTerm m)
+mapM_ f = awaitForever $ liftPipeMonad . f
 
 -- | Ignore a certain number of values in the stream. This function is
 -- semantically equivalent to:
@@ -175,7 +173,7 @@ mapM_ f = awaitForever $ lift . f
 -- memory.
 --
 -- Since 0.3.0
-drop :: Await m
+drop :: IsPipe m
      => Int
      -> m ()
 drop =
@@ -191,9 +189,9 @@ drop =
 -- > take i = isolate i =$ consume
 --
 -- Since 0.3.0
-take :: Await m
+take :: IsPipe m
      => Int
-     -> m [AwaitInput m]
+     -> m [PipeInput m]
 take =
     loop id
   where
@@ -205,24 +203,24 @@ take =
 -- | Take a single value from the stream, if available.
 --
 -- Since 0.3.0
-head :: Await m
-     => m (Maybe (AwaitInput m))
+head :: IsPipe m
+     => m (Maybe (PipeInput m))
 head = await
 
 -- | Look at the next value in the stream, if available. This function will not
 -- change the state of the stream.
 --
 -- Since 0.3.0
-peek :: Await m
-     => m (Maybe (AwaitInput m))
+peek :: IsPipe m
+     => m (Maybe (PipeInput m))
 peek = await >>= maybe (return Nothing) (\x -> leftover x >> return (Just x))
 
 -- | Apply a transformation to all values in a stream.
 --
 -- Since 0.3.0
-map :: (Yield m, Await m)
-    => (AwaitInput m -> YieldOutput m)
-    -> m (AwaitTerm m)
+map :: IsPipe m
+    => (PipeInput m -> PipeOutput m)
+    -> m (PipeTerm m)
 map f = awaitForever $ yield . f
 
 {-
@@ -251,61 +249,61 @@ differences based on leftovers.
 -- side-effects of running the action, see 'mapM_'.
 --
 -- Since 0.3.0
-mapM :: (MonadTrans t, Yield (t m), Await (t m), Monad m)
-     => (AwaitInput (t m) -> m (YieldOutput (t m)))
-     -> t m (AwaitTerm (t m))
-mapM f = awaitForever $ yield <=< lift . f
+mapM :: IsPipe m
+     => (PipeInput m -> PipeMonad m (PipeOutput m))
+     -> m (PipeTerm m)
+mapM f = awaitForever $ yield <=< liftPipeMonad . f
 
 -- | Apply a transformation that may fail to all values in a stream, discarding
 -- the failures.
 --
 -- Since 0.5.1
-mapMaybe :: (Await m, Yield m)
-         => (AwaitInput m -> Maybe (YieldOutput m))
-         -> m (AwaitTerm m)
+mapMaybe :: IsPipe m
+         => (PipeInput m -> Maybe (PipeOutput m))
+         -> m (PipeTerm m)
 mapMaybe f = awaitForever $ maybe (return ()) yield . f
 
 -- | Apply a monadic transformation that may fail to all values in a stream,
 -- discarding the failures.
 --
 -- Since 0.5.1
-mapMaybeM :: (Await (t m), Yield (t m), Monad m, MonadTrans t)
-          => (AwaitInput (t m) -> m (Maybe (YieldOutput (t m))))
-          -> t m (AwaitTerm (t m))
-mapMaybeM f = awaitForever $ maybe (return ()) yield <=< lift . f
+mapMaybeM :: IsPipe m
+          => (PipeInput m -> PipeMonad m (Maybe (PipeOutput m)))
+          -> m (PipeTerm m)
+mapMaybeM f = awaitForever $ maybe (return ()) yield <=< liftPipeMonad . f
 
 -- | Filter the @Just@ values from a stream, discarding the @Nothing@  values.
 --
 -- Since 0.5.1
-catMaybes :: (Yield m, AwaitInput m ~ Maybe (YieldOutput m), Await m)
-          => m (AwaitTerm m)
+catMaybes :: (PipeInput m ~ Maybe (PipeOutput m), IsPipe m)
+          => m (PipeTerm m)
 catMaybes = awaitForever $ maybe (return ()) yield
 
 -- | Apply a transformation to all values in a stream, concatenating the output
 -- values.
 --
 -- Since 0.3.0
-concatMap :: (Yield m, Await m)
-          => (AwaitInput m -> [YieldOutput m])
-          -> m (AwaitTerm m)
+concatMap :: IsPipe m
+          => (PipeInput m -> [PipeOutput m])
+          -> m (PipeTerm m)
 concatMap f = awaitForever $ Prelude.mapM_ yield . f
 
 -- | Apply a monadic transformation to all values in a stream, concatenating
 -- the output values.
 --
 -- Since 0.3.0
-concatMapM :: (Yield (t m), Await (t m), Monad m, MonadTrans t)
-           => (AwaitInput (t m) -> m [YieldOutput (t m)])
-           -> t m (AwaitTerm (t m))
-concatMapM f = awaitForever $ Prelude.mapM_ yield <=< lift . f
+concatMapM :: IsPipe m
+           => (PipeInput m -> PipeMonad m [PipeOutput m])
+           -> m (PipeTerm m)
+concatMapM f = awaitForever $ Prelude.mapM_ yield <=< liftPipeMonad . f
 
 -- | 'concatMap' with an accumulator.
 --
 -- Since 0.3.0
-concatMapAccum :: (Yield m, Await m)
-               => (AwaitInput m -> accum -> (accum, [YieldOutput m]))
+concatMapAccum :: IsPipe m
+               => (PipeInput m -> accum -> (accum, [PipeOutput m]))
                -> accum
-               -> m (AwaitTerm m)
+               -> m (PipeTerm m)
 concatMapAccum f =
     loop
   where
@@ -320,10 +318,10 @@ concatMapAccum f =
 -- | 'concatMapM' with an accumulator.
 --
 -- Since 0.3.0
-concatMapAccumM :: (Yield (t m), Await (t m), Monad m, MonadTrans t)
-                => (AwaitInput (t m) -> accum -> m (accum, [YieldOutput (t m)]))
+concatMapAccumM :: IsPipe m
+                => (PipeInput m -> accum -> PipeMonad m (accum, [PipeOutput m]))
                 -> accum
-                -> t m (AwaitTerm (t m))
+                -> m (PipeTerm m)
 concatMapAccumM f =
     loop
   where
@@ -331,7 +329,7 @@ concatMapAccumM f =
         awaitE >>= either return go
       where
         go a = do
-            (accum', bs) <- lift $ f a accum
+            (accum', bs) <- liftPipeMonad $ f a accum
             Prelude.mapM_ yield bs
             loop accum'
 
@@ -340,8 +338,8 @@ concatMapAccumM f =
 -- "Data.Conduit.Lazy".
 --
 -- Since 0.3.0
-consume :: Await m
-        => m [AwaitInput m]
+consume :: IsPipe m
+        => m [PipeInput m]
 consume =
     loop id
   where
@@ -350,9 +348,9 @@ consume =
 -- | Grouping input according to an equality function.
 --
 -- Since 0.3.0
-groupBy :: ([AwaitInput m] ~ YieldOutput m, Await m, Yield m)
-        => (AwaitInput m -> AwaitInput m -> Bool)
-        -> m (AwaitTerm m)
+groupBy :: ([PipeInput m] ~ PipeOutput m, IsPipe m)
+        => (PipeInput m -> PipeInput m -> Bool)
+        -> m (PipeTerm m)
 groupBy f =
     start
   where
@@ -378,7 +376,7 @@ groupBy f =
 -- >     ...
 --
 -- Since 0.3.0
-isolate :: (YieldOutput m ~ AwaitInput m, Yield m, Await m)
+isolate :: (PipeOutput m ~ PipeInput m, IsPipe m)
         => Int
         -> m ()
 isolate =
@@ -390,24 +388,24 @@ isolate =
 -- | Keep only values in the stream passing a given predicate.
 --
 -- Since 0.3.0
-filter :: (AwaitInput m ~ YieldOutput m, Yield m, Await m)
-       => (AwaitInput m -> Bool)
-       -> m (AwaitTerm m)
+filter :: (PipeInput m ~ PipeOutput m, IsPipe m)
+       => (PipeInput m -> Bool)
+       -> m (PipeTerm m)
 filter f = awaitForever $ \i -> when (f i) (yield i)
 
 -- | Ignore the remainder of values in the source. Particularly useful when
 -- combined with 'isolate'.
 --
 -- Since 0.3.0
-sinkNull :: Await m
-         => m (AwaitTerm m)
+sinkNull :: IsPipe m
+         => m (PipeTerm m)
 sinkNull = awaitForever $ \_ -> return ()
 
 -- | A source that outputs no values. Note that this is just a type-restricted
 -- synonym for 'mempty'.
 --
 -- Since 0.3.0
-sourceNull :: Yield m
+sourceNull :: IsPipe m
            => m ()
 sourceNull = return ()
 
@@ -415,9 +413,9 @@ sourceNull = return ()
 -- when no more input is available from upstream.
 --
 -- Since 0.5.0
-sequence :: (Yield m, Await m)
-         => m (YieldOutput m)
-         -> m (AwaitTerm m)
+sequence :: IsPipe m
+         => m (PipeOutput m)
+         -> m (PipeTerm m)
 sequence sink =
     self
   where

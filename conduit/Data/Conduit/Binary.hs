@@ -51,9 +51,9 @@ import qualified System.PosixFile as F
 -- | Stream the contents of a file as binary data.
 --
 -- Since 0.3.0
-sourceFile :: (YieldOutput (t m) ~ S.ByteString, ResourcePipe t, MonadIO (t m), Yield (t m), MonadResource m)
+sourceFile :: (PipeOutput m ~ S.ByteString, ResourcePipe m)
            => FilePath
-           -> t m ()
+           -> m ()
 sourceFile fp =
 #if CABAL_OS_WINDOWS || NO_HANDLES
     bracketP
@@ -71,7 +71,7 @@ sourceFile fp =
 -- completes, since it did not acquire the @Handle@ in the first place.
 --
 -- Since 0.3.0
-sourceHandle :: (YieldOutput m ~ S.ByteString, Yield m, MonadIO m)
+sourceHandle :: (PipeOutput m ~ S.ByteString, IsPipe m, MonadIO m)
              => IO.Handle
              -> m ()
 sourceHandle h =
@@ -89,18 +89,18 @@ sourceHandle h =
 -- and closed it as soon as possible.
 --
 -- Since 0.3.0
-sourceIOHandle :: (ResourcePipe t, YieldOutput (t m) ~ S.ByteString, Yield (t m), MonadIO (t m), MonadResource m)
+sourceIOHandle :: (PipeOutput m ~ S.ByteString, ResourcePipe m)
                => IO IO.Handle
-               -> t m ()
+               -> m ()
 sourceIOHandle alloc = bracketP alloc IO.hClose sourceHandle
 
 -- | Stream all incoming data to the given 'IO.Handle'. Note that this function
 -- will /not/ automatically close the @Handle@ when processing completes.
 --
 -- Since 0.3.0
-sinkHandle :: (AwaitInput m ~ S.ByteString, Await m, MonadIO m)
+sinkHandle :: (PipeInput m ~ S.ByteString, ResourcePipe m)
            => IO.Handle
-           -> m (AwaitTerm m)
+           -> m (PipeTerm m)
 sinkHandle h = awaitForever $ liftIO . S.hPut h
 
 -- | An alternative to 'sinkHandle'.
@@ -109,20 +109,20 @@ sinkHandle h = awaitForever $ liftIO . S.hPut h
 -- and close it as soon as possible.
 --
 -- Since 0.3.0
-sinkIOHandle :: (MonadResource m, AwaitInput (t m) ~ S.ByteString, MonadIO (t m), Await (t m), ResourcePipe t)
+sinkIOHandle :: (PipeInput m ~ S.ByteString, ResourcePipe m)
              => IO IO.Handle
-             -> t m (AwaitTerm (t m))
+             -> m (PipeTerm m)
 sinkIOHandle alloc = bracketP alloc IO.hClose sinkHandle
 
 -- | Stream the contents of a file as binary data, starting from a certain
 -- offset and only consuming up to a certain number of bytes.
 --
 -- Since 0.3.0
-sourceFileRange :: (MonadResource m, YieldOutput (t m) ~ S.ByteString, Yield (t m), MonadIO (t m), ResourcePipe t)
+sourceFileRange :: (PipeOutput m ~ S.ByteString, ResourcePipe m)
                 => FilePath
                 -> Maybe Integer -- ^ Offset
                 -> Maybe Integer -- ^ Maximum count
-                -> t m ()
+                -> m ()
 sourceFileRange fp offset count = bracketP
     (IO.openBinaryFile fp IO.ReadMode)
     IO.hClose
@@ -157,18 +157,18 @@ sourceFileRange fp offset count = bracketP
 -- | Stream all incoming data to the given file.
 --
 -- Since 0.3.0
-sinkFile :: (MonadResource m, AwaitInput (t m) ~ S.ByteString, MonadIO (t m), ResourcePipe t, Await (t m))
+sinkFile :: (PipeInput m ~ S.ByteString, ResourcePipe m)
          => FilePath
-         -> t m (AwaitTerm (t m))
+         -> m (PipeTerm m)
 sinkFile fp = sinkIOHandle (IO.openBinaryFile fp IO.WriteMode)
 
 -- | Stream the contents of the input to a file, and also send it along the
 -- pipeline. Similar in concept to the Unix command @tee@.
 --
 -- Since 0.3.0
-conduitFile :: (MonadResource m, YieldOutput (t m) ~ S.ByteString, AwaitInput (t m) ~ S.ByteString, MonadIO (t m), Yield (t m), Await (t m), ResourcePipe t)
+conduitFile :: (PipeOutput m ~ S.ByteString, PipeInput m ~ S.ByteString, ResourcePipe m)
             => FilePath
-            -> t m (AwaitTerm (t m))
+            -> m (PipeTerm m)
 conduitFile fp = bracketP
     (IO.openBinaryFile fp IO.WriteMode)
     IO.hClose
@@ -181,7 +181,7 @@ conduitFile fp = bracketP
 -- consumed.
 --
 -- Since 0.3.0
-isolate :: (YieldOutput m ~ S.ByteString, AwaitInput m ~ S.ByteString, Yield m, Await m)
+isolate :: (PipeOutput m ~ S.ByteString, PipeInput m ~ S.ByteString, IsPipe m)
         => Int
         -> m ()
 isolate =
@@ -203,7 +203,7 @@ isolate =
 -- | Return the next byte from the stream, if available.
 --
 -- Since 0.3.0
-head :: (AwaitInput m ~ S.ByteString, Await m)
+head :: (PipeInput m ~ S.ByteString, IsPipe m)
      => m (Maybe Word8)
 head = do
     mbs <- await
@@ -217,7 +217,7 @@ head = do
 -- | Return all bytes while the predicate returns @True@.
 --
 -- Since 0.3.0
-takeWhile :: (AwaitInput m ~ S.ByteString, YieldOutput m ~ S.ByteString, Yield m, Await m)
+takeWhile :: (PipeInput m ~ S.ByteString, PipeOutput m ~ S.ByteString, IsPipe m)
           => (Word8 -> Bool)
           -> m ()
 takeWhile p =
@@ -235,7 +235,7 @@ takeWhile p =
 -- | Ignore all bytes while the predicate returns @True@.
 --
 -- Since 0.3.0
-dropWhile :: (AwaitInput m ~ S.ByteString, Await m)
+dropWhile :: (PipeInput m ~ S.ByteString, IsPipe m)
           => (Word8 -> Bool)
           -> m ()
 dropWhile p =
@@ -252,7 +252,7 @@ dropWhile p =
 -- | Take the given number of bytes, if available.
 --
 -- Since 0.3.0
-take :: (AwaitInput m ~ S.ByteString, Await m)
+take :: (PipeInput m ~ S.ByteString, IsPipe m)
      => Int
      -> m L.ByteString
 take n0 =
@@ -272,7 +272,7 @@ take n0 =
 -- | Drop up to the given number of bytes.
 --
 -- Since 0.5.0
-drop :: (AwaitInput m ~ S.ByteString, Await m)
+drop :: (PipeInput m ~ S.ByteString, IsPipe m)
      => Int
      -> m ()
 drop =
@@ -293,8 +293,8 @@ drop =
 -- (10), and strip it from the output.
 --
 -- Since 0.3.0
-lines :: (YieldOutput m ~ S.ByteString, AwaitInput m ~ S.ByteString, Yield m, Await m)
-      => m (AwaitTerm m)
+lines :: (PipeOutput m ~ S.ByteString, PipeInput m ~ S.ByteString, IsPipe m)
+      => m (PipeTerm m)
 lines =
     loop id
   where
@@ -316,7 +316,7 @@ lines =
 -- | Stream the chunks from a lazy bytestring.
 --
 -- Since 0.5.0
-sourceLbs :: (YieldOutput m ~ S.ByteString, Yield m)
+sourceLbs :: (PipeOutput m ~ S.ByteString, IsPipe m)
           => L.ByteString
           -> m ()
 sourceLbs = mapM_ yield . L.toChunks

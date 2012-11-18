@@ -21,9 +21,8 @@ module Data.Conduit
 
       -- * Primitives
       -- $primitives
-    , Await (..)
+    , IsPipe (..)
     , awaitForever
-    , Yield (..)
       -- ** Finalization
     , ResourcePipe (..)
 
